@@ -39,6 +39,7 @@ struct Transaction {
 
 ```rust
 struct Block {
+    current_block: u32,
     transactions: Vec<Transaction>,
     previous_block: u32
 }
@@ -58,3 +59,8 @@ At this stage, a simple implementation of a minimal virtual machine and a smart 
 ### Stage 4 – Iterative improvement of the virtual machine and smart contracts
 
 ### Stage 5 – Experiments with cutting-edge ideas and technologies.
+
+# License
+
+This project is licensed under the Apache License, Version 2.0.
+See the `LICENSE` file in the repository root for details.
