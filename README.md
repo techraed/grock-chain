@@ -19,9 +19,9 @@ The purpose of this stage is to implement a minimal baseline blockchain with a l
 
 * Transactions and blocks
 * Networking
-* Database
+* Storage
 
-Experienced developers will certainly point out that consensus, an execution engine (VM, smart contracts), RPC, and similar components are also required. Yes, we are aware of this. However, at this stage it is important to implement the most fundamental components—the ones that come to mind first and whose purpose does not require lengthy explanations. It is generally understood that any web service requires a persistent layer, a networking layer for interaction, and the application logic itself. In Substrate terminology, the latter is referred to as the runtime. At the first stage, this will consist of simple transactions that modify the blockchain state.
+Experienced developers will certainly point out that consensus, an execution engine (VM, smart contracts), RPC, and similar components are also required. Yes, we are aware of this. However, at this stage it is important to implement the most fundamental components—the ones that come to mind first and whose purpose does not require lengthy explanations. It is generally understood that any web service requires a storage layer, a networking layer for interaction, and the application logic itself. In Substrate terminology, the latter is referred to as the runtime. At the first stage, this will consist of simple transactions that modify the blockchain state.
 
 #### Core terms:
 
