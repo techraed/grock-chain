@@ -4,12 +4,12 @@ The core goal of this project is to implement a semi-toy blockchain that is clos
 
 Practical understanding is far more valuable than purely theoretical study of this domain. Moreover, a hands-on approach makes it possible to become familiar with Rust crates that are useful for blockchain development. Therefore, the project is not only educational in nature, but also aimed at professional growth.
 
-An important methodological note: the project is developed iteratively, with implementation taking precedence over specification. In other words, we are not going to first read A. Antonopoulos and only then start writing code. Instead, we will write code, encounter problems, and then look for solutions that are already described in the literature. This approach enables deeper understanding of the material and provides practical skills.
+An important methodological note: the project is developed iteratively, with implementation taking precedence over specification. In other words, we are not going to first read theory (A. Antonopoulos, for example) and only then start writing code. Instead, we will write code, encounter problems, and then look for solutions that are already described in the literature. This approach enables deeper understanding of the material and provides practical skills.
 
 We would also like to note that this plan will be refined as the project progresses.
 
 # Engage with us
-Telegram channel - [@grock_that_chain_finally](https://t.me/grock_that_chain_finally)
+Telegram channel - [@grok_chain](https://t.me/grok_chain)
 
 # Project
 
@@ -50,7 +50,24 @@ struct Block {
 
 ### Stage 2 – Iterative improvement of the blockchain with the addition of real-world characteristics
 
-This stage will be refined as Stage 1 is implemented. The main idea is to encounter problems that arise in real blockchains and attempt to solve them. This stage will consist of sub-stages, each of which will be described in a separate document and stored here.
+#### Stage 2.1.
+1. Cryptography for authentication and integrity (ECDSA signatures, SHA256 hashing).
+- [x] Basic private/public key generation and management.
+- [x] Signing transactions.
+- [x] Verifying signatures.
+2. Transactions UTXO model
+- [ ] Basic UTXO structure
+- [ ] Transaction creation, validation, execution
+3. Persistence layer (using `sled` crate) - SECTION TBD
+- [ ] Storing blocks
+- [ ] Storing UTXOs
+4. Block format
+- [ ] Merkle tree for transactions
+- [ ] Block header with timestamp, nonce, previous block hash
+- [ ] Block verification, application and revocation
+5. Networking layer
+6. Sync and fork handling
+7. Performance and observability
 
 ### Stage 3 – Implementation of a virtual machine and smart contracts
 
