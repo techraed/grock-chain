@@ -17,7 +17,7 @@ pub enum GrokChainError {
 #[derive(Debug, thiserror::Error)]
 pub enum CryptoError {
     #[error("Failed to sign message with the private key: {0}")]
-    MessageSigningFailed(#[from] k256::ecdsa::Error),
+    MessageSigningFailed(k256::ecdsa::Error),
     #[error("Failed to verify message signature: {0}")]
-    MessageVerificationFailed(#[from] k256::ecdsa::Error),
+    MessageVerificationFailed(k256::ecdsa::Error),
 }

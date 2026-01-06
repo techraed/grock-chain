@@ -138,7 +138,11 @@ impl Signature {
     ///
     /// Note: This method hashes the message internally.
     #[allow(deprecated)]
-    pub fn verify(&self, message: impl AsRef<[u8]>, public_key: &PublicKey) -> Result<(), CryptoError> {
+    pub fn verify(
+        &self,
+        message: impl AsRef<[u8]>,
+        public_key: &PublicKey,
+    ) -> Result<(), CryptoError> {
         let verifying_key = VerifyingKey::from(&public_key.0);
 
         let msg_digest = Sha256::digest(message);
