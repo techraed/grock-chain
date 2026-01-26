@@ -121,8 +121,8 @@ pub struct TransactionOutput {
 
 #[cfg(test)]
 mod tests {
-    use k256::elliptic_curve::rand_core::{RngCore, OsRng};
     use super::*;
+    use k256::elliptic_curve::rand_core::{OsRng, RngCore};
 
     // Test that `encode` gives us expected data.
     #[test]
