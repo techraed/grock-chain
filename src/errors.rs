@@ -11,6 +11,8 @@
 pub enum GrokChainError {
     #[error("Cryptography error: {0}")]
     Crypto(#[from] CryptoError),
+    #[error("Codec error: {0}")]
+    Codec(#[from] CodecError),
 }
 
 /// Cryptography related errors.
@@ -20,4 +22,20 @@ pub enum CryptoError {
     MessageSigningFailed(k256::ecdsa::Error),
     #[error("Failed to verify message signature: {0}")]
     MessageVerificationFailed(k256::ecdsa::Error),
+}
+
+/// Transaction related errors.
+#[derive(Debug, thiserror::Error)]
+pub enum TransactionError {
+    #[error("Failed to serialize transaction: {0}")]
+    FailedTransactionSerialization(#[from] CodecError),
+}
+
+/// Codec related errors
+#[derive(Debug, thiserror::Error)]
+pub enum CodecError {
+    #[error("Failed to serialize data: {0}")]
+    SerializationFailed(postcard::Error),
+    #[error("Failed to deserialize data: {0}")]
+    DeserializationFailed(postcard::Error),
 }

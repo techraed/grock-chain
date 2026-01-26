@@ -4,10 +4,9 @@
 //! Crypto module providing cryptographic functionalities.
 
 // TODO: temporarily
-#![allow(dead_code)]
+#![allow(dead_code, deprecated)]
 
 use crate::errors::CryptoError;
-#[allow(deprecated)]
 use k256::{
     PublicKey as K256PublicKey, SecretKey as K256SecretKey,
     ecdsa::{
@@ -36,14 +35,12 @@ impl PrivateKey {
 
     /// Creates a private key from a 32-byte array.
     pub fn from_bytes(bytes: &[u8; 32]) -> Option<Self> {
-        #[allow(deprecated)]
         K256SecretKey::from_bytes(GenericArray::from_slice(bytes))
             .ok()
             .map(PrivateKey)
     }
 
     /// Sign a message with the private key.
-    #[allow(deprecated)]
     pub fn sign(&self, message: impl AsRef<[u8]>) -> Result<Signature, CryptoError> {
         let signing_key = SigningKey::from(&self.0);
 
@@ -70,7 +67,7 @@ impl PrivateKey {
 ///
 /// Public keys can be safely shared. They are actively used to verify signatures created by
 /// the corresponding private key and to derive blockchain addresses.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicKey(K256PublicKey);
 
 impl PublicKey {
@@ -89,6 +86,61 @@ impl PublicKey {
             .as_bytes()
             .try_into()
             .expect("secp256k1 compressed public key should be 33 bytes")
+    }
+}
+
+// Serialize public key to 33-bytes compressed format
+impl Serialize for PublicKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Serialize as a tuple (fixed-size sequence) to avoid length prefix
+        use serde::ser::SerializeTuple;
+        let bytes = self.to_bytes();
+        let mut tuple = serializer.serialize_tuple(33)?;
+        for byte in &bytes {
+            tuple.serialize_element(byte)?;
+        }
+        tuple.end()
+    }
+}
+
+// Deserialize public key from 33-bytes compressed format
+impl<'de> Deserialize<'de> for PublicKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Create a visitor to read a fixed-size array of 33 bytes
+        struct ArrayVisitor;
+        impl<'de> serde::de::Visitor<'de> for ArrayVisitor {
+            type Value = [u8; 33];
+
+            fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+                formatter.write_str("a 33-byte array")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut arr = [0u8; 33];
+                for (i, byte) in arr.iter_mut().enumerate() {
+                    *byte = seq
+                        .next_element()?
+                        .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
+                }
+                Ok(arr)
+            }
+        }
+
+        // Reads a tuple of 33 elements, because the public key was serialized as a tuple of 33 bytes.
+        let bytes = deserializer.deserialize_tuple(33, ArrayVisitor)?;
+
+        K256PublicKey::from_sec1_bytes(&bytes)
+            .map(PublicKey)
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -117,7 +169,7 @@ impl From<&PrivateKey> for PublicKey {
 ///
 /// The signature is generated deterministically using RFC 6979, which derives the nonce
 /// from the private key and message hash, preventing catastrophic nonce reuse vulnerabilities.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Signature {
     signature: K256Signature,
     recovery_id: u8,
@@ -137,7 +189,6 @@ impl Signature {
     /// - The message has not been tampered with since signing
     ///
     /// Note: This method hashes the message internally.
-    #[allow(deprecated)]
     pub fn verify(
         &self,
         message: impl AsRef<[u8]>,
@@ -149,5 +200,82 @@ impl Signature {
         verifying_key
             .verify_prehash(msg_digest.as_slice(), &self.signature)
             .map_err(CryptoError::MessageVerificationFailed)
+    }
+
+    /// Converts the signature to a 65-byte array: 64 bytes for (r, s) + 1 byte for recovery_id.
+    pub fn to_bytes(&self) -> [u8; 65] {
+        let mut ret = [0u8; 65];
+        ret.get_mut(..64)
+            .expect("slice is 65 bytes; qed.")
+            .copy_from_slice(self.signature.to_bytes().as_slice());
+        ret[64] = self.recovery_id;
+
+        ret
+    }
+}
+
+/// SHA-256 hash wrapper.
+///
+/// Basically a newtype around a 32-byte array representing a SHA-256 hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hash256([u8; 32]);
+
+impl Hash256 {
+    /// Creates a new SHA-256 hash from the given data.
+    pub fn new(data: impl AsRef<[u8]>) -> Self {
+        let inner = Sha256::digest(data)
+            .as_slice()
+            .try_into()
+            .expect("sha256 returns 32 bytes; qed.");
+
+        Self(inner)
+    }
+
+    /// Returns the inner 32-byte array.
+    pub fn to_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+/// Allows creating a `Hash256` directly from a 32-byte array.
+impl From<[u8; 32]> for Hash256 {
+    fn from(data: [u8; 32]) -> Self {
+        Self(data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec;
+
+    #[test]
+    fn codec_smoke_test() {
+        let hash = Hash256::new(b"hello world");
+        let encoded = codec::encode(&hash).expect("internal error: encoding failed");
+        let bytes = hash.to_bytes().to_vec();
+        assert_eq!(encoded, bytes);
+        let decoded = codec::decode::<Hash256>(&encoded).expect("internal error: decoding failed");
+        assert_eq!(hash, decoded);
+
+        let pk = PrivateKey::random();
+
+        let signature = pk
+            .sign(b"test message")
+            .expect("internal error: signing failed");
+        let encoded = codec::encode(&signature).expect("internal error: encoding failed");
+        let bytes = signature.to_bytes().to_vec();
+        assert_eq!(encoded, bytes);
+        let decoded =
+            codec::decode::<Signature>(&encoded).expect("internal error: decoding failed");
+        assert_eq!(signature, decoded);
+
+        let pub_key = PublicKey::from(&pk);
+        let encoded_pub = codec::encode(&pub_key).expect("internal error: encoding failed");
+        let bytes = pub_key.to_bytes().to_vec();
+        assert_eq!(encoded_pub, bytes);
+        let decoded_pub =
+            codec::decode::<PublicKey>(&encoded_pub).expect("internal error: decoding failed");
+        assert_eq!(pub_key, decoded_pub);
     }
 }

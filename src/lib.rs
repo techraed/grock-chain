@@ -1,8 +1,10 @@
 // Copyright 2025 Sabaun Taraki
 // SPDX-License-Identifier: Apache-2.0
 
+mod codec;
 mod crypto;
 mod errors;
+mod transaction;
 
 use serde::{Deserialize, Serialize};
 use std::{
