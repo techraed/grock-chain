@@ -1,8 +1,10 @@
 // Copyright 2025 Sabaun Taraki
 // SPDX-License-Identifier: Apache-2.0
 
+mod block;
 mod codec;
 mod crypto;
+mod db;
 mod errors;
 mod transaction;
 

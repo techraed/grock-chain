@@ -56,8 +56,8 @@ struct Block {
 - [x] Signing transactions.
 - [x] Verifying signatures.
 2. Transactions UTXO model
-- [ ] Basic UTXO structure
-- [ ] Transaction creation, validation, execution
+- [x] Basic UTXO structure
+- [x] Transaction creation, validation, execution
 3. Persistence layer (using `sled` crate) - SECTION TBD
 - [ ] Storing blocks
 - [ ] Storing UTXOs

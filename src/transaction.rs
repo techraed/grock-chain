@@ -9,6 +9,7 @@
 use crate::{
     codec,
     crypto::{Hash256, PublicKey, Signature},
+    db::Database,
     errors::TransactionError,
 };
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,95 @@ const HEINLEIN: u64 = 1;
 /// Heinlein is needed to avoid floating point precision issues.
 /// So 0.000000001 Grok = 1 Heinlein.
 const GROK: u64 = 1_000_000_000 * HEINLEIN;
+
+/// Executes a valid transaction
+pub fn execute_tx(tx: Transaction, db: &Database) -> Result<(), TransactionError> {
+    let Transaction {
+        inputs,
+        outputs,
+        id,
+    } = tx;
+
+    for input in inputs {
+        let output_id = input.tx_id.inner();
+        let output_idx = input.idx;
+
+        db
+            .remove_tx_output(output_id, output_idx)
+            .map_err(|db_err| {
+                TransactionError::TransactionOutputNotFound(output_id, output_idx, db_err)
+            })?;
+    }
+
+    let id = id.inner();
+    for (idx, output) in outputs.into_iter().enumerate() {
+        db.insert_tx_output(id, idx, &output)
+            .map_err(|db_err| TransactionError::FailedToInsertTransactionOutput(id, idx, db_err))?;
+    }
+
+    Ok(())
+}
+
+pub fn revert_tx(tx: Transaction, db: &Database) -> Result<(), TransactionError> {
+    let Transaction {
+        inputs,
+        outputs,
+        id,
+    } = tx;
+
+    let id = id.inner();
+    for (idx, output) in outputs.into_iter().enumerate() {
+        db.remove_tx_output(id, idx)
+            .map_err(|db_err| TransactionError::TransactionOutputNotFound(id, idx, db_err))?;
+    }
+
+    for input in inputs {
+        todo!("bring back spent outputs");
+    }
+
+    Ok(())
+}
+
+/// Validates a transaction.
+///
+/// Basically checks:
+/// 1. Inputs and outputs are non-empty.
+/// 2. Each input refers to a valid unspent output in the database.
+/// 3. Each input's signature is valid for the corresponding output's challenge data.
+/// 4. Total input amount is greater than or equal to total output amount.
+pub fn validate_tx(tx: &Transaction, db: &Database) -> Result<(), TransactionError> {
+    let tx_id = tx.id.inner();
+    if tx.inputs.is_empty() || tx.outputs.is_empty() {
+        return Err(TransactionError::EmptyTransaction(tx_id));
+    }
+
+    let mut total_input_sum = 0u64;
+    for input in &tx.inputs {
+        let output_id = input.tx_id.inner();
+        let output_idx = input.idx;
+        let output = db
+            .tx_output(output_id, Some(output_idx))
+            .map_err(|db_err| {
+                TransactionError::TransactionOutputNotFound(output_id, output_idx, db_err)
+            })?;
+
+        // TODO: not safe verification (open issue)
+        input
+            .signature
+            .verify(output.challenge.as_ref(), &output.ownership)
+            .map_err(|ce| TransactionError::InvalidSignature(tx.id.inner(), ce))?;
+
+        total_input_sum = total_input_sum.saturating_add(output.amount);
+    }
+
+    let total_output_sum = tx.outputs.iter().map(|output| output.amount).sum::<u64>();
+
+    if total_input_sum < total_output_sum {
+        return Err(TransactionError::InsufficientFunds(tx.id.inner()));
+    }
+
+    Ok(())
+}
 
 /// Grok chain UTXO transaction.
 ///
@@ -50,7 +140,7 @@ const GROK: u64 = 1_000_000_000 * HEINLEIN;
 /// system - you just give ownership of some value to someone else.
 ///
 /// *Note*: transaction outputs primary for the system, as inputs always refer to previous outputs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transaction {
     pub inputs: Vec<TransactionInput>,
     pub outputs: Vec<TransactionOutput>,
@@ -66,7 +156,8 @@ impl Transaction {
         inputs: Vec<TransactionInput>,
         outputs: Vec<TransactionOutput>,
     ) -> Result<Self, TransactionError> {
-        let tx_bytes = codec::encode(&(&inputs, &outputs))?;
+        let tx_bytes = codec::encode(&(&inputs, &outputs))
+            .map_err(TransactionError::FailedRawTransactionSerialization)?;
         let id = TransactionId(Hash256::new(tx_bytes));
 
         Ok(Self {
@@ -83,7 +174,7 @@ impl Transaction {
 ///
 /// *Note*: The identifier isn't possible to be instantiated directly, only through
 /// creating a transaction.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionId(Hash256);
 
 impl TransactionId {
@@ -100,7 +191,7 @@ impl TransactionId {
 /// The index is the position of the output in the previous transaction's outputs list.
 /// The signature is used to prove ownership of the output being spent. It's basically a signature
 /// over the challenge data in the transaction output being spent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionInput {
     pub tx_id: TransactionId,
     pub idx: usize,
@@ -112,7 +203,7 @@ pub struct TransactionInput {
 /// Transaction output is a primary component of UTXO-based transaction systems.
 /// It represents a specific amount of currency assigned to a public key (ownership).
 /// The challenge field is an arbitrary data that a spender must sign to prove ownership of the output.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionOutput {
     pub amount: u64,
     pub ownership: PublicKey,
