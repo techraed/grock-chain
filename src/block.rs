@@ -17,45 +17,82 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Applies a valid block to the blockchain.
-pub fn apply_block(block: Block, db: &Database) -> Result<(), BlockChainError> {
-    for tx in &block.transactions {
-        // todo [sab]: get rid of clone
-        transaction::execute_tx(tx.clone(), db).map_err(|tx_err| {
-            BlockChainError::InvalidTransaction(Box::new((tx.id.inner(), tx_err)))
-        })?;
-    }
-
+pub fn apply_block(
+    block: Block,
+    db: &Database,
+    recovery_store: &mut BTreeMap<Hash256, BlockRecoveryData>,
+) -> Result<(), BlockChainError> {
     let block_hash = Block::block_hash(&block)?;
+
+    for tx in &block.transactions {
+        apply_tx(block_hash, tx, db, recovery_store)?;
+    }
 
     db.insert_block(block_hash, block)
         .map_err(BlockChainError::FailedToStoreBlock)
 }
 
+fn apply_tx(
+    block_hash: Hash256,
+    tx: &Transaction,
+    db: &Database,
+    recovery_store: &mut BTreeMap<Hash256, BlockRecoveryData>,
+) -> Result<(), BlockChainError> {
+    for input in &tx.inputs {
+        let output_id = input.tx_id;
+        let output_index = input.idx;
+
+        let output = db
+            .remove_tx_output(output_id.inner(), output_index)
+            .map_err(BlockChainError::FailedToRemoveTransactionOutput)?;
+
+        let data = recovery_store
+            .entry(block_hash)
+            .or_default();
+
+        data.outputs.push((output_id, output, output_index));
+    }
+
+    for (idx, output) in tx.outputs.iter().enumerate() {
+        db.insert_tx_output(tx.id.inner(), idx, output)
+            .map_err(BlockChainError::FailedToInsertTransactionOutput)?;
+    }
+
+    Ok(())
+}
+
 pub fn revert_block(
     block_hash: Hash256,
     db: &Database,
-    revert_store: &mut BTreeMap<Hash256, Vec<(TransactionId, TransactionOutput)>>,
+    recovery_store: &mut BTreeMap<Hash256, BlockRecoveryData>,
 ) -> Result<Block, BlockChainError> {
     let block = db
         .remove_block(block_hash)
         .map_err(BlockChainError::FailedToRemoveBlock)?;
 
-    let recovering_outputs = revert_store
-        .remove(&block_hash)
-        .unwrap_or_else(|| unreachable!("Reverted block not found"));
-
-    for tx in block.transactions.iter() {
-        transaction::revert_tx(tx, db).map_err(|tx_err| {
-            BlockChainError::InvalidTransaction(Box::new((tx.id.inner(), tx_err)))
-        })?;
+    for tx in &block.transactions {
+        revert_tx(tx, db)?;
     }
 
-    for (idx, (tx_id, output)) in recovering_outputs.into_iter().enumerate() {
+    let block_recovery = recovery_store
+        .remove(&block_hash)
+        .unwrap_or_else(|| unreachable!("Block recovery data not found"));
+
+    for (tx_id, output, idx) in block_recovery.outputs {
         db.insert_tx_output(tx_id.inner(), idx, &output)
-            .expect("todo [sab]");
+            .map_err(BlockChainError::FailedToInsertTransactionOutput)?;
     }
 
     Ok(block)
+}
+
+fn revert_tx(tx: &Transaction, db: &Database) -> Result<(), BlockChainError> {
+    for idx in 0..tx.outputs.len() {
+        db.remove_tx_output(tx.id.inner(), idx)
+            .map_err(BlockChainError::FailedToRemoveTransactionOutput)?;
+    }
+
+    Ok(())
 }
 
 /// Validates a block.
@@ -65,27 +102,23 @@ pub fn revert_block(
 /// 2. All transactions in the block are valid.
 pub fn validate_block(block: &Block, db: &Database) -> Result<(), BlockChainError> {
     match db.block(block.previous_block_hash) {
-        Err(DatabaseError::BlockNotFound(_)) => {
-            return Err(BlockChainError::OrphanBlockReceived(
-                block.previous_block_hash,
-            ));
-        }
-        Err(db_err) => {
-            return Err(BlockChainError::CannotGetBlock(
-                block.previous_block_hash,
-                db_err,
-            ));
-        }
-        _ => {}
-    };
+        Err(DatabaseError::BlockNotFound(_)) => Err(BlockChainError::OrphanBlockReceived(
+            block.previous_block_hash,
+        )),
+        Err(db_err) => Err(BlockChainError::CannotGetBlock(
+            block.previous_block_hash,
+            db_err,
+        )),
+        _ => {
+            for tx in &block.transactions {
+                transaction::validate_tx(tx, db).map_err(|tx_err| {
+                    BlockChainError::InvalidTransaction(Box::new((tx.id.inner(), tx_err)))
+                })?;
+            }
 
-    for tx in &block.transactions {
-        transaction::validate_tx(tx, db).map_err(|tx_err| {
-            BlockChainError::InvalidTransaction(Box::new((tx.id.inner(), tx_err)))
-        })?;
+            Ok(())
+        }
     }
-
-    Ok(())
 }
 
 /// Block structure representing a single block in the blockchain.
@@ -139,4 +172,13 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
         .as_secs()
+}
+
+/// Block data for block reverting.
+///
+/// Whenever a block is applied we store a removed
+/// from the state data to recover it in case of a reorg.
+#[derive(Debug, Clone, Default)]
+pub struct BlockRecoveryData {
+    outputs: Vec<(TransactionId, TransactionOutput, usize)>,
 }

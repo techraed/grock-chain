@@ -28,52 +28,14 @@ const HEINLEIN: u64 = 1;
 /// So 0.000000001 Grok = 1 Heinlein.
 const GROK: u64 = 1_000_000_000 * HEINLEIN;
 
-/// Executes a valid transaction
-pub fn execute_tx(tx: Transaction, db: &Database) -> Result<(), TransactionError> {
-    let Transaction {
-        inputs,
-        outputs,
-        id,
-    } = tx;
-
-    for input in inputs {
-        let output_id = input.tx_id.inner();
-        let output_idx = input.idx;
-
-        db.remove_tx_output(output_id, output_idx)
-            .map_err(|db_err| {
-                TransactionError::TransactionOutputNotFound(output_id, output_idx, db_err)
-            })?;
-    }
-
-    let id = id.inner();
-    for (idx, output) in outputs.into_iter().enumerate() {
-        db.insert_tx_output(id, idx, &output)
-            .map_err(|db_err| TransactionError::FailedToInsertTransactionOutput(id, idx, db_err))?;
-    }
-
-    Ok(())
-}
-
-pub fn revert_tx(tx: &Transaction, db: &Database) -> Result<(), TransactionError> {
-    let Transaction { outputs, id, .. } = tx;
-
-    let id = id.inner();
-    for idx in 0..outputs.len() {
-        db.remove_tx_output(id, idx)
-            .map_err(|db_err| TransactionError::TransactionOutputNotFound(id, idx, db_err))?;
-    }
-
-    Ok(())
-}
-
 /// Validates a transaction.
 ///
 /// Basically checks:
 /// 1. Inputs and outputs are non-empty.
 /// 2. Each input refers to a valid unspent output in the database.
 /// 3. Each input's signature is valid for the corresponding output's challenge data.
-/// 4. Total input amount is greater than or equal to total output amount.
+/// 4. Total output amount is greater than zero.
+/// 5. Total input amount is greater than or equal to total output amount
 pub fn validate_tx(tx: &Transaction, db: &Database) -> Result<(), TransactionError> {
     let tx_id = tx.id.inner();
     if tx.inputs.is_empty() || tx.outputs.is_empty() {
@@ -82,28 +44,43 @@ pub fn validate_tx(tx: &Transaction, db: &Database) -> Result<(), TransactionErr
 
     let mut total_input_sum = 0u64;
     for input in &tx.inputs {
-        let output_id = input.tx_id.inner();
-        let output_idx = input.idx;
-        let output = db.tx_output(output_id, output_idx).map_err(|db_err| {
-            TransactionError::TransactionOutputNotFound(output_id, output_idx, db_err)
-        })?;
-
-        // TODO: not safe verification (open issue)
-        input
-            .signature
-            .verify(output.challenge.as_ref(), &output.ownership)
-            .map_err(|ce| TransactionError::InvalidSignature(tx.id.inner(), ce))?;
-
-        total_input_sum = total_input_sum.saturating_add(output.amount);
+        let amount = validate_input(input, db)?;
+        total_input_sum = total_input_sum.saturating_add(amount);
     }
 
     let total_output_sum = tx.outputs.iter().map(|output| output.amount).sum::<u64>();
 
+    if total_output_sum == 0 {
+        return Err(TransactionError::ZeroOutputTransaction(tx_id));
+    }
+
     if total_input_sum < total_output_sum {
-        return Err(TransactionError::InsufficientFunds(tx.id.inner()));
+        return Err(TransactionError::InsufficientFunds(tx_id));
     }
 
     Ok(())
+}
+
+/// Validates particular transaction input.
+///
+/// Basically checks:
+/// 1. Input refers to a valid unspent output in the database.
+/// 2. Input's signature is valid for the corresponding output's challenge data.
+fn validate_input(input: &TransactionInput, db: &Database) -> Result<u64, TransactionError> {
+    let output_id = input.tx_id.inner();
+    let output_idx = input.idx;
+    let output = db.tx_output(output_id, output_idx).map_err(|db_err| {
+        TransactionError::TransactionOutputNotFound(output_id, output_idx, db_err)
+    })?;
+
+    input
+        .signature
+        .verify(output.challenge.as_ref(), &output.ownership)
+        .map_err(|crypto_err| {
+            TransactionError::InvalidSignature(input.tx_id.inner(), crypto_err)
+        })?;
+
+    Ok(output.amount)
 }
 
 /// Grok chain UTXO transaction.
@@ -118,7 +95,7 @@ pub fn validate_tx(tx: &Transaction, db: &Database) -> Result<(), TransactionErr
 /// output from a previous transaction, similar to how a check represents a claim on funds from a
 /// bank account. The outputs of the transaction specify new claims on funds, akin to how a check
 /// specifies the amount to be paid to the recipient. Outputs are like new checks created by the
-/// transaction sender, which can be redeemed by the recipients specified in the outputs. The receipient
+/// transaction sender, which can be redeemed by the recipients specified in the outputs. The recipient
 /// then can use those outputs as inputs in future transactions.
 ///
 /// The description above looks like we are designing the processing and transferring system, but where
@@ -202,12 +179,30 @@ pub struct TransactionOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::{PrivateKey, PublicKey};
     use k256::elliptic_curve::rand_core::{OsRng, RngCore};
+
+    fn create_valid_output(
+        amount: u64,
+        public_key: Option<PublicKey>,
+        challenge: [u8; 32],
+    ) -> TransactionOutput {
+        let public_key = public_key.unwrap_or_else(|| {
+            let pk = PrivateKey::random();
+            PublicKey::from(&pk)
+        });
+
+        TransactionOutput {
+            amount,
+            ownership: public_key,
+            challenge,
+        }
+    }
 
     // Test that `encode` gives us expected data.
     #[test]
     fn codec_smoke_test() {
-        let pk = crate::crypto::PrivateKey::random();
+        let pk = PrivateKey::random();
         let pub_key = PublicKey::from(&pk);
         let signature = pk
             .sign(b"test transaction")
@@ -238,5 +233,207 @@ mod tests {
         assert_eq!(tx_output.amount, decoded.amount);
         assert_eq!(tx_output.ownership.to_bytes(), decoded.ownership.to_bytes());
         assert_eq!(tx_output.challenge, decoded.challenge);
+    }
+
+    #[test]
+    fn validate_empty() {
+        let db = Database::create_test_db();
+        let pk = PrivateKey::random();
+        let challenge = [1u8; 32];
+        let output = create_valid_output(GROK, Some((&pk).into()), challenge);
+
+        // Empty inputs
+        let tx = Transaction {
+            inputs: vec![],
+            outputs: vec![output],
+            id: TransactionId(Hash256::new(b"test_tx")),
+        };
+        let result = validate_tx(&tx, &db);
+        assert!(matches!(result, Err(TransactionError::EmptyTransaction(_))));
+
+        // Empty outputs
+        let signature = pk.sign(challenge).expect("internal error: signing failed");
+        let input = TransactionInput {
+            tx_id: TransactionId(Hash256::new(b"prev_tx")),
+            idx: 0,
+            signature,
+        };
+        let tx = Transaction {
+            inputs: vec![input],
+            outputs: vec![],
+            id: TransactionId(Hash256::new(b"test_tx")),
+        };
+        let result = validate_tx(&tx, &db);
+        assert!(matches!(result, Err(TransactionError::EmptyTransaction(_))));
+
+        // Both empty
+        let tx = Transaction {
+            inputs: vec![],
+            outputs: vec![],
+            id: TransactionId(Hash256::new(b"test_tx")),
+        };
+        let result = validate_tx(&tx, &db);
+        assert!(matches!(result, Err(TransactionError::EmptyTransaction(_))));
+    }
+
+    #[test]
+    fn validate_missing_output_in_db() {
+        let pk = PrivateKey::random();
+        let challenge = [3u8; 32];
+        let signature = pk.sign(challenge).unwrap();
+
+        let output_idx = TransactionId(Hash256::new(b"prev_tx"));
+        let output = create_valid_output(GROK, Some((&pk).into()), challenge);
+        let input = TransactionInput {
+            tx_id: output_idx,
+            idx: 0,
+            signature: signature.clone(),
+        };
+
+        let tx = Transaction {
+            inputs: vec![input],
+            outputs: vec![output.clone()],
+            id: TransactionId(Hash256::new(b"test_tx")),
+        };
+
+        let db = Database::create_test_db();
+        let result = validate_tx(&tx, &db);
+        assert!(matches!(
+            result,
+            Err(TransactionError::TransactionOutputNotFound(_, _, _))
+        ));
+
+        // Insert the output and test again with wrong index
+        db.insert_tx_output(output_idx.inner(), 0, &output)
+            .expect("Failed to insert output");
+        let input = TransactionInput {
+            tx_id: output_idx,
+            idx: 1, // wrong index
+            signature,
+        };
+        let tx = Transaction {
+            inputs: vec![input],
+            outputs: vec![output],
+            id: TransactionId(Hash256::new(b"test_tx")),
+        };
+        let result = validate_tx(&tx, &db);
+        assert!(matches!(
+            result,
+            Err(TransactionError::TransactionOutputNotFound(_, _, _))
+        ));
+    }
+
+    #[test]
+    fn validate_zero_output_amount() {
+        let db = Database::create_test_db();
+        let pk = PrivateKey::random();
+        let challenge = [0u8; 32];
+        let signature = pk.sign(challenge).unwrap();
+
+        // Create and store a valid output
+        let prev_output = create_valid_output(GROK, Some((&pk).into()), challenge);
+        let prev_tx_id = Hash256::new(b"prev_tx");
+        db.insert_tx_output(prev_tx_id, 0, &prev_output)
+            .expect("Failed to insert output");
+
+        let input = TransactionInput {
+            tx_id: TransactionId(prev_tx_id),
+            idx: 0,
+            signature,
+        };
+
+        // Create transaction with zero total output amount
+        let tx = Transaction {
+            inputs: vec![input],
+            outputs: vec![create_valid_output(0, None, [0u8; 32])],
+            id: TransactionId(Hash256::new(b"test_tx")),
+        };
+
+        let result = validate_tx(&tx, &db);
+        assert!(matches!(
+            result,
+            Err(TransactionError::ZeroOutputTransaction(_))
+        ));
+    }
+
+    #[test]
+    fn validate_insufficient_funds() {
+        let db = Database::create_test_db();
+        let pk = PrivateKey::random();
+        let challenge = [0u8; 32];
+        let signature = pk.sign(challenge).unwrap();
+
+        // Create and store an output with 1 GROK
+        let prev_output = create_valid_output(GROK, Some((&pk).into()), challenge);
+        let prev_tx_id = Hash256::new(b"prev_tx");
+        db.insert_tx_output(prev_tx_id, 0, &prev_output)
+            .expect("Failed to insert output");
+
+        let input = TransactionInput {
+            tx_id: TransactionId(prev_tx_id),
+            idx: 0,
+            signature,
+        };
+
+        // Create transaction trying to spend 2 GROK (only have 1)
+        let tx = Transaction {
+            inputs: vec![input],
+            outputs: vec![create_valid_output(2 * GROK, None, [0u8; 32])],
+            id: TransactionId(Hash256::new(b"test_tx")),
+        };
+
+        let result = validate_tx(&tx, &db);
+        assert!(matches!(
+            result,
+            Err(TransactionError::InsufficientFunds(_))
+        ));
+    }
+
+    #[test]
+    fn validate_invalid_signature() {
+        let db = Database::create_test_db();
+
+        // Create first valid input
+        let pk1 = PrivateKey::random();
+        let challenge1 = [1u8; 32];
+        let signature1 = pk1.sign(challenge1).unwrap();
+
+        let prev_output1 = create_valid_output(GROK, Some((&pk1).into()), challenge1);
+        let prev_tx_id1 = Hash256::new(b"prev_tx_1");
+        db.insert_tx_output(prev_tx_id1, 0, &prev_output1)
+            .expect("Failed to insert output");
+
+        let input1 = TransactionInput {
+            tx_id: TransactionId(prev_tx_id1),
+            idx: 0,
+            signature: signature1,
+        };
+
+        // Create second input with wrong signature (pk2 signs challenge1, but stored output has different ownership)
+        let pk2 = PrivateKey::random();
+        let wrong_signature = pk2.sign([2u8; 32]).unwrap(); // Wrong signature: signed different data
+
+        let prev_output2 = create_valid_output(GROK, Some((&pk2).into()), [10u8; 32]); // Different data
+        let prev_tx_id2 = Hash256::new(b"prev_tx_2");
+        db.insert_tx_output(prev_tx_id2, 0, &prev_output2)
+            .expect("Failed to insert output");
+
+        let input2 = TransactionInput {
+            tx_id: TransactionId(prev_tx_id2),
+            idx: 0,
+            signature: wrong_signature,
+        };
+
+        let tx = Transaction {
+            inputs: vec![input1, input2],
+            outputs: vec![create_valid_output(GROK, None, [0u8; 32])],
+            id: TransactionId(Hash256::new(b"test_tx")),
+        };
+
+        let result = validate_tx(&tx, &db);
+        assert!(matches!(
+            result,
+            Err(TransactionError::InvalidSignature(_, _))
+        ));
     }
 }

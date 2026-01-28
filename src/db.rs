@@ -89,14 +89,20 @@ impl Database {
         Ok(())
     }
 
-    pub fn remove_tx_output(&self, tx_id: Hash256, idx: usize) -> Result<(), DatabaseError> {
+    pub fn remove_tx_output(
+        &self,
+        tx_id: Hash256,
+        idx: usize,
+    ) -> Result<TransactionOutput, DatabaseError> {
         let key = self.tx_key(tx_id, idx);
-        self.txs_tree
+        let output_bytes = self
+            .txs_tree
             .remove(key)
             .map_err(DatabaseError::CannotGetTxOutput)?
             .ok_or(DatabaseError::TransactionOutputNotFound(tx_id))?;
 
-        Ok(())
+        codec::decode::<TransactionOutput>(output_bytes.as_ref())
+            .map_err(|codec_err| DatabaseError::FailedTxOutputDeserialization(tx_id, codec_err))
     }
 
     pub fn remove_block(&self, block_hash: Hash256) -> Result<Block, DatabaseError> {
@@ -117,11 +123,8 @@ impl Database {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::crypto::{PrivateKey, PublicKey};
-
-    fn create_test_db() -> Database {
+impl Database {
+    pub fn create_test_db() -> Database {
         let db = sled::Config::new()
             .temporary(true)
             .open()
@@ -137,6 +140,12 @@ mod tests {
             txs_tree,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::{PrivateKey, PublicKey};
 
     // Helper to create a dummy block
     fn dummy_block(bn: u32, timestamp: u64) -> Block {
@@ -159,8 +168,8 @@ mod tests {
     }
 
     #[test]
-    fn test_block_access() {
-        let db = create_test_db();
+    fn block_access() {
+        let db = Database::create_test_db();
 
         // Test 1: non-existent block
         let hash = Hash256::new(b"nonexistent");
@@ -186,8 +195,8 @@ mod tests {
     }
 
     #[test]
-    fn test_block_remove_and_inaccessible() {
-        let db = create_test_db();
+    fn block_remove_and_inaccessible() {
+        let db = Database::create_test_db();
         let hash = Hash256::new(b"block2");
         let block = dummy_block(1, 100);
 
@@ -200,8 +209,8 @@ mod tests {
     }
 
     #[test]
-    fn test_block_reset_on_overwrite() {
-        let db = create_test_db();
+    fn block_reset_on_overwrite() {
+        let db = Database::create_test_db();
         let hash = Hash256::new(b"block3");
 
         let block1 = dummy_block(1, 100);
@@ -217,8 +226,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_access() {
-        let db = create_test_db();
+    fn tx_access() {
+        let db = Database::create_test_db();
 
         // Test 1: non-existent tx hash
         let tx_id = Hash256::new(b"nonexistent_tx");
@@ -255,8 +264,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_remove_and_inaccessible() {
-        let db = create_test_db();
+    fn tx_remove_and_inaccessible() {
+        let db = Database::create_test_db();
         let tx_id = Hash256::new(b"tx4");
         let output = dummy_tx_output(1000, 1);
 
@@ -276,8 +285,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_reset_on_overwrite() {
-        let db = create_test_db();
+    fn tx_reset_on_overwrite() {
+        let db = Database::create_test_db();
         let tx_id = Hash256::new(b"tx5");
 
         let output1 = dummy_tx_output(1000, 1);

@@ -45,6 +45,8 @@ pub enum TransactionError {
     TransactionOutputNotFound(Hash256, usize, DatabaseError),
     #[error("Failed to insert transaction output with ID {0:?} and idx {1}: {2:?}")]
     FailedToInsertTransactionOutput(Hash256, usize, DatabaseError),
+    #[error("Zero output transaction: transaction ID {0:?} has total output amount of zero")]
+    ZeroOutputTransaction(Hash256),
 }
 
 /// Codec related errors
@@ -104,4 +106,8 @@ pub enum BlockChainError {
     FailedToStoreBlock(DatabaseError),
     #[error("Failed to remove block from db: {0}")]
     FailedToRemoveBlock(DatabaseError),
+    #[error("Failed to insert transaction output: {0}")]
+    FailedToInsertTransactionOutput(DatabaseError),
+    #[error("Failed to remove transaction output: {0}")]
+    FailedToRemoveTransactionOutput(DatabaseError),
 }
