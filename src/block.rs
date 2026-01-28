@@ -7,7 +7,11 @@
 #![allow(dead_code)]
 
 use crate::{
-    codec, crypto::Hash256, db::Database, errors::{BlockChainError, DatabaseError}, transaction::{self, Transaction}
+    codec,
+    crypto::Hash256,
+    db::Database,
+    errors::{BlockChainError, DatabaseError},
+    transaction::{self, Transaction},
 };
 use serde::{Deserialize, Serialize};
 
@@ -15,32 +19,33 @@ use serde::{Deserialize, Serialize};
 pub fn apply_block(block: Block, db: &Database) -> Result<(), BlockChainError> {
     for tx in &block.transactions {
         // todo [sab]: get rid of clone
-        transaction::execute_tx(tx.clone(), db)
-            .map_err(|tx_err| BlockChainError::InvalidTransaction(tx.id.inner(), tx_err))?;
+        transaction::execute_tx(tx.clone(), db).map_err(|tx_err| {
+            BlockChainError::InvalidTransaction(Box::new((tx.id.inner(), tx_err)))
+        })?;
     }
 
     let block_hash = Block::block_hash(&block)?;
 
-    db
-        .insert_block(block_hash, block)
-        .map_err(|db_err| BlockChainError::FailedToStoreBlock(db_err))
+    db.insert_block(block_hash, block)
+        .map_err(BlockChainError::FailedToStoreBlock)
 }
 
 pub fn revert_block(block_hash: Hash256, db: &Database) -> Result<Block, BlockChainError> {
     let block = db
         .remove_block(block_hash)
-        .map_err(|db_err| BlockChainError::FailedToRemoveBlock(db_err))?;
+        .map_err(BlockChainError::FailedToRemoveBlock)?;
 
     for tx in block.transactions.iter() {
         // todo [sab]: get rid of clone
-        transaction::revert_tx(tx.clone(), db)
-            .map_err(|tx_err| BlockChainError::InvalidTransaction(tx.id.inner(), tx_err))?;
+        transaction::revert_tx(tx.clone(), db).map_err(|tx_err| {
+            BlockChainError::InvalidTransaction(Box::new((tx.id.inner(), tx_err)))
+        })?;
     }
 
     let block_hash = Block::block_hash(&block)?;
 
     db.remove_block(block_hash)
-        .map_err(|db_err| BlockChainError::FailedToStoreBlock(db_err))
+        .map_err(BlockChainError::FailedToStoreBlock)
 }
 
 /// Validates a block.
@@ -65,8 +70,9 @@ pub fn validate_block(block: &Block, db: &Database) -> Result<(), BlockChainErro
     };
 
     for tx in &block.transactions {
-        transaction::validate_tx(tx, db)
-            .map_err(|tx_err| BlockChainError::InvalidTransaction(tx.id.inner(), tx_err))?;
+        transaction::validate_tx(tx, db).map_err(|tx_err| {
+            BlockChainError::InvalidTransaction(Box::new((tx.id.inner(), tx_err)))
+        })?;
     }
 
     Ok(())
@@ -109,8 +115,8 @@ impl Block {
     }
 
     pub fn block_hash(block: &Self) -> Result<Hash256, BlockChainError> {
-        let block_bytes = codec::encode(block)
-            .map_err(BlockChainError::FailedBlockSerialization)?;
+        let block_bytes =
+            codec::encode(block).map_err(BlockChainError::FailedBlockSerialization)?;
 
         Ok(Hash256::new(block_bytes))
     }

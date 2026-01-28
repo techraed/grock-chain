@@ -10,7 +10,9 @@
 // TODO: temporarily
 #![allow(dead_code)]
 
-use crate::{block::Block, codec, crypto::Hash256, errors::DatabaseError, transaction::TransactionOutput};
+use crate::{
+    block::Block, codec, crypto::Hash256, errors::DatabaseError, transaction::TransactionOutput,
+};
 
 const TX_OUTPUT_KEY_PREFIX: &str = "tx_output";
 const BLOCK_KEY_PREFIX: &str = "block";
@@ -111,11 +113,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn remove_tx_output(
-        &self,
-        tx_id: Hash256,
-        idx: usize,
-    ) -> Result<(), DatabaseError> {
+    pub fn remove_tx_output(&self, tx_id: Hash256, idx: usize) -> Result<(), DatabaseError> {
         let key = DatabaseKeys::TxOutput(tx_id, idx).into_db_key();
         self.db
             .remove(key)
@@ -126,7 +124,8 @@ impl Database {
 
     pub fn remove_block(&self, block_hash: Hash256) -> Result<Block, DatabaseError> {
         let key = DatabaseKeys::Block(block_hash).into_db_key();
-        let v = self.db
+        let v = self
+            .db
             .remove(key)
             .map_err(DatabaseError::CannotGetBlock)?
             .ok_or(DatabaseError::BlockNotFound(block_hash))?;

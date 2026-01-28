@@ -40,8 +40,7 @@ pub fn execute_tx(tx: Transaction, db: &Database) -> Result<(), TransactionError
         let output_id = input.tx_id.inner();
         let output_idx = input.idx;
 
-        db
-            .remove_tx_output(output_id, output_idx)
+        db.remove_tx_output(output_id, output_idx)
             .map_err(|db_err| {
                 TransactionError::TransactionOutputNotFound(output_id, output_idx, db_err)
             })?;
@@ -64,12 +63,12 @@ pub fn revert_tx(tx: Transaction, db: &Database) -> Result<(), TransactionError>
     } = tx;
 
     let id = id.inner();
-    for (idx, output) in outputs.into_iter().enumerate() {
+    for (idx, _output) in outputs.into_iter().enumerate() {
         db.remove_tx_output(id, idx)
             .map_err(|db_err| TransactionError::TransactionOutputNotFound(id, idx, db_err))?;
     }
 
-    for input in inputs {
+    for _input in inputs {
         todo!("bring back spent outputs");
     }
 

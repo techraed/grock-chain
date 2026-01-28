@@ -10,8 +10,6 @@
 // TODO: temporarily
 #![allow(dead_code)]
 
-use core::error;
-
 use crate::crypto::Hash256;
 
 /// General grok chain error.
@@ -98,8 +96,8 @@ pub enum BlockChainError {
     CannotGetBlock(Hash256, DatabaseError),
     #[error("Orphan block received with hash {0:?}")]
     OrphanBlockReceived(Hash256),
-    #[error("Invalid transaction {0:?}: {1}")]
-    InvalidTransaction(Hash256, TransactionError),
+    #[error("Invalid transaction {0:?}")]
+    InvalidTransaction(Box<(Hash256, TransactionError)>),
     #[error("Failed to serialize block: {0}")]
     FailedBlockSerialization(CodecError),
     #[error("Failed to store block to db: {0}")]
