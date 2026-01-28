@@ -55,21 +55,13 @@ pub fn execute_tx(tx: Transaction, db: &Database) -> Result<(), TransactionError
     Ok(())
 }
 
-pub fn revert_tx(tx: Transaction, db: &Database) -> Result<(), TransactionError> {
-    let Transaction {
-        inputs,
-        outputs,
-        id,
-    } = tx;
+pub fn revert_tx(tx: &Transaction, db: &Database) -> Result<(), TransactionError> {
+    let Transaction { outputs, id, .. } = tx;
 
     let id = id.inner();
-    for (idx, _output) in outputs.into_iter().enumerate() {
+    for idx in 0..outputs.len() {
         db.remove_tx_output(id, idx)
             .map_err(|db_err| TransactionError::TransactionOutputNotFound(id, idx, db_err))?;
-    }
-
-    for _input in inputs {
-        todo!("bring back spent outputs");
     }
 
     Ok(())
@@ -92,11 +84,9 @@ pub fn validate_tx(tx: &Transaction, db: &Database) -> Result<(), TransactionErr
     for input in &tx.inputs {
         let output_id = input.tx_id.inner();
         let output_idx = input.idx;
-        let output = db
-            .tx_output(output_id, Some(output_idx))
-            .map_err(|db_err| {
-                TransactionError::TransactionOutputNotFound(output_id, output_idx, db_err)
-            })?;
+        let output = db.tx_output(output_id, output_idx).map_err(|db_err| {
+            TransactionError::TransactionOutputNotFound(output_id, output_idx, db_err)
+        })?;
 
         // TODO: not safe verification (open issue)
         input

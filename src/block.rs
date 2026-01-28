@@ -11,9 +11,10 @@ use crate::{
     crypto::Hash256,
     db::Database,
     errors::{BlockChainError, DatabaseError},
-    transaction::{self, Transaction},
+    transaction::{self, Transaction, TransactionId, TransactionOutput},
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Applies a valid block to the blockchain.
 pub fn apply_block(block: Block, db: &Database) -> Result<(), BlockChainError> {
@@ -30,22 +31,31 @@ pub fn apply_block(block: Block, db: &Database) -> Result<(), BlockChainError> {
         .map_err(BlockChainError::FailedToStoreBlock)
 }
 
-pub fn revert_block(block_hash: Hash256, db: &Database) -> Result<Block, BlockChainError> {
+pub fn revert_block(
+    block_hash: Hash256,
+    db: &Database,
+    revert_store: &mut BTreeMap<Hash256, Vec<(TransactionId, TransactionOutput)>>,
+) -> Result<Block, BlockChainError> {
     let block = db
         .remove_block(block_hash)
         .map_err(BlockChainError::FailedToRemoveBlock)?;
 
+    let recovering_outputs = revert_store
+        .remove(&block_hash)
+        .unwrap_or_else(|| unreachable!("Reverted block not found"));
+
     for tx in block.transactions.iter() {
-        // todo [sab]: get rid of clone
-        transaction::revert_tx(tx.clone(), db).map_err(|tx_err| {
+        transaction::revert_tx(tx, db).map_err(|tx_err| {
             BlockChainError::InvalidTransaction(Box::new((tx.id.inner(), tx_err)))
         })?;
     }
 
-    let block_hash = Block::block_hash(&block)?;
+    for (idx, (tx_id, output)) in recovering_outputs.into_iter().enumerate() {
+        db.insert_tx_output(tx_id.inner(), idx, &output)
+            .expect("todo [sab]");
+    }
 
-    db.remove_block(block_hash)
-        .map_err(BlockChainError::FailedToStoreBlock)
+    Ok(block)
 }
 
 /// Validates a block.
