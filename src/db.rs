@@ -12,6 +12,40 @@
 use crate::{
     block::Block, codec, crypto::Hash256, errors::DatabaseError, transaction::TransactionOutput,
 };
+use sled::{
+    Transactional, Tree,
+    transaction::{ConflictableTransactionError, TransactionalTree},
+};
+
+pub enum DatabaseOperation {
+    InsertBlock {
+        block_hash: Hash256,
+        block: Block,
+    },
+    RemoveBlock {
+        block_hash: Hash256,
+    },
+    InsertTxOutput {
+        tx_id: Hash256,
+        idx: usize,
+        output: TransactionOutput,
+    },
+    RemoveTxOutput {
+        tx_id: Hash256,
+        idx: usize,
+    },
+}
+
+pub enum DatabaseOperationOutcome {
+    InsertBlock,
+    RemoveBlock(Block),
+    InsertTxOutput,
+    RemoveTxOutput {
+        tx_id: Hash256,
+        idx: usize,
+        output: TransactionOutput,
+    },
+}
 
 pub struct Database {
     blocks_tree: sled::Tree,
@@ -31,6 +65,91 @@ impl Database {
             blocks_tree,
             txs_tree,
         })
+    }
+
+    pub fn transactional_ops(
+        &self,
+        ops: Vec<DatabaseOperation>,
+    ) -> Result<Vec<DatabaseOperationOutcome>, DatabaseError> {
+        let Database {
+            blocks_tree,
+            txs_tree,
+        } = &self;
+
+        let run_transaction = |trees: (&Tree, &Tree), ops: Vec<DatabaseOperation>| {
+            <(&Tree, &Tree) as Transactional<DatabaseError>>::transaction(
+                &trees,
+                |(blocks_tree, txs_tree): &(TransactionalTree, TransactionalTree)| {
+                    let mut outcomes = Vec::with_capacity(ops.len());
+                    for op in &ops {
+                        match op {
+                            DatabaseOperation::InsertBlock { block_hash, block } => {
+                                let key = block_hash.to_bytes();
+                                let block_bytes = codec::encode(&block).map_err(|codec_err| {
+                                    DatabaseError::FailedBlockSerialization(*block_hash, codec_err)
+                                })?;
+
+                                let _ = blocks_tree.insert(&key, block_bytes).expect("todo [sab]");
+
+                                outcomes.push(DatabaseOperationOutcome::InsertBlock);
+                            }
+                            DatabaseOperation::RemoveBlock { block_hash } => {
+                                let key = block_hash.to_bytes();
+                                let block_bytes = blocks_tree
+                                    .remove(&key)?
+                                    .ok_or(DatabaseError::BlockNotFound(*block_hash))?;
+
+                                let block = codec::decode::<Block>(block_bytes.as_ref()).map_err(
+                                    |codec_err| {
+                                        DatabaseError::FailedBlockDeserialization(
+                                            *block_hash,
+                                            codec_err,
+                                        )
+                                    },
+                                )?;
+
+                                outcomes.push(DatabaseOperationOutcome::RemoveBlock(block));
+                            }
+                            DatabaseOperation::InsertTxOutput { tx_id, idx, output } => {
+                                let key = Self::tx_key(*tx_id, *idx);
+                                let output_bytes = codec::encode(&output).map_err(|codec_err| {
+                                    DatabaseError::FailedTxOutputSerialization(*tx_id, codec_err)
+                                })?;
+
+                                let _ = txs_tree.insert(key, output_bytes)?;
+
+                                outcomes.push(DatabaseOperationOutcome::InsertTxOutput);
+                            }
+                            DatabaseOperation::RemoveTxOutput { tx_id, idx } => {
+                                let (tx_id, idx) = (*tx_id, *idx);
+                                let key = Self::tx_key(tx_id, idx);
+                                let output_bytes = txs_tree
+                                    .remove(key)?
+                                    .ok_or(DatabaseError::TransactionOutputNotFound(tx_id))?;
+
+                                let output =
+                                    codec::decode::<TransactionOutput>(output_bytes.as_ref())
+                                        .map_err(|codec_err| {
+                                            DatabaseError::FailedTxOutputDeserialization(
+                                                tx_id, codec_err,
+                                            )
+                                        })?;
+                                outcomes.push(DatabaseOperationOutcome::RemoveTxOutput {
+                                    output,
+                                    tx_id,
+                                    idx,
+                                });
+                            }
+                        }
+                    }
+
+                    Ok(outcomes)
+                },
+            )
+        };
+
+        run_transaction((blocks_tree, txs_tree), ops)
+            .map_err(|tx_err| DatabaseError::TransactionFailed(Box::new(tx_err)))
     }
 
     pub fn block(&self, block_hash: Hash256) -> Result<Block, DatabaseError> {
@@ -62,7 +181,7 @@ impl Database {
         tx_id: Hash256,
         idx: usize,
     ) -> Result<TransactionOutput, DatabaseError> {
-        let key = self.tx_key(tx_id, idx);
+        let key = Self::tx_key(tx_id, idx);
         let tx_output_bytes = self
             .txs_tree
             .get(key)
@@ -79,7 +198,7 @@ impl Database {
         idx: usize,
         output: &TransactionOutput,
     ) -> Result<(), DatabaseError> {
-        let key = self.tx_key(tx_id, idx);
+        let key = Self::tx_key(tx_id, idx);
         let output_bytes = codec::encode(output)
             .map_err(|codec_err| DatabaseError::FailedTxOutputSerialization(tx_id, codec_err))?;
 
@@ -94,7 +213,7 @@ impl Database {
         tx_id: Hash256,
         idx: usize,
     ) -> Result<TransactionOutput, DatabaseError> {
-        let key = self.tx_key(tx_id, idx);
+        let key = Self::tx_key(tx_id, idx);
         let output_bytes = self
             .txs_tree
             .remove(key)
@@ -107,17 +226,17 @@ impl Database {
 
     pub fn remove_block(&self, block_hash: Hash256) -> Result<Block, DatabaseError> {
         let key = block_hash.to_bytes();
-        let v = self
+        let block_bytes = self
             .blocks_tree
             .remove(key)
             .map_err(DatabaseError::CannotGetBlock)?
             .ok_or(DatabaseError::BlockNotFound(block_hash))?;
 
-        codec::decode::<Block>(v.as_ref())
+        codec::decode::<Block>(block_bytes.as_ref())
             .map_err(|codec_err| DatabaseError::FailedBlockDeserialization(block_hash, codec_err))
     }
 
-    fn tx_key(&self, tx_id: Hash256, idx: usize) -> Vec<u8> {
+    fn tx_key(tx_id: Hash256, idx: usize) -> Vec<u8> {
         [tx_id.to_bytes().as_ref(), &idx.to_be_bytes()].concat()
     }
 }
@@ -139,6 +258,12 @@ impl Database {
             blocks_tree,
             txs_tree,
         }
+    }
+}
+
+impl From<DatabaseError> for ConflictableTransactionError<DatabaseError> {
+    fn from(error: DatabaseError) -> Self {
+        ConflictableTransactionError::Abort(error)
     }
 }
 

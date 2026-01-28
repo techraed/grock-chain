@@ -9,9 +9,9 @@
 use crate::{
     codec,
     crypto::Hash256,
-    db::Database,
+    db::{Database, DatabaseOperation, DatabaseOperationOutcome},
     errors::{BlockChainError, DatabaseError},
-    transaction::{self, Transaction, TransactionId, TransactionOutput},
+    transaction::{self, Transaction, TransactionOutput},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -24,75 +24,94 @@ pub fn apply_block(
 ) -> Result<(), BlockChainError> {
     let block_hash = Block::block_hash(&block)?;
 
+    let mut data_operations = Vec::new();
+
     for tx in &block.transactions {
-        apply_tx(block_hash, tx, db, recovery_store)?;
+        let mut ops = apply_tx(tx)?;
+        data_operations.append(&mut ops);
     }
 
-    db.insert_block(block_hash, block)
-        .map_err(BlockChainError::FailedToStoreBlock)
+    data_operations.push(DatabaseOperation::InsertBlock { block_hash, block });
+
+    let outcomes = db
+        .transactional_ops(data_operations)
+        .map_err(|db_err| BlockChainError::FailedToApplyBlock(block_hash, db_err))?;
+
+    // todo [sab] recovery storage is tightly connected to transaction. It must be changed even inside the transaction
+    for outcome in outcomes {
+        let DatabaseOperationOutcome::RemoveTxOutput { tx_id, idx, output } = outcome else {
+            continue;
+        };
+
+        let data = recovery_store.entry(block_hash).or_default();
+
+        data.outputs.push((tx_id, output, idx));
+    }
+
+    Ok(())
 }
 
-fn apply_tx(
-    block_hash: Hash256,
-    tx: &Transaction,
-    db: &Database,
-    recovery_store: &mut BTreeMap<Hash256, BlockRecoveryData>,
-) -> Result<(), BlockChainError> {
+fn apply_tx(tx: &Transaction) -> Result<Vec<DatabaseOperation>, BlockChainError> {
+    let mut data_operations = Vec::with_capacity(tx.inputs.len() + tx.outputs.len());
+
     for input in &tx.inputs {
-        let output_id = input.tx_id;
+        let output_id = input.tx_id.inner();
         let output_index = input.idx;
 
-        let output = db
-            .remove_tx_output(output_id.inner(), output_index)
-            .map_err(BlockChainError::FailedToRemoveTransactionOutput)?;
-
-        let data = recovery_store
-            .entry(block_hash)
-            .or_default();
-
-        data.outputs.push((output_id, output, output_index));
+        data_operations.push(DatabaseOperation::RemoveTxOutput {
+            tx_id: output_id,
+            idx: output_index,
+        });
     }
 
     for (idx, output) in tx.outputs.iter().enumerate() {
-        db.insert_tx_output(tx.id.inner(), idx, output)
-            .map_err(BlockChainError::FailedToInsertTransactionOutput)?;
+        // todo [sab] get rid of clone
+        data_operations.push(DatabaseOperation::InsertTxOutput {
+            tx_id: tx.id.inner(),
+            idx,
+            output: output.clone(),
+        });
     }
 
-    Ok(())
+    Ok(data_operations)
 }
 
 pub fn revert_block(
-    block_hash: Hash256,
-    db: &Database,
-    recovery_store: &mut BTreeMap<Hash256, BlockRecoveryData>,
+    _block_hash: Hash256,
+    _db: &Database,
+    _recovery_store: &mut BTreeMap<Hash256, BlockRecoveryData>,
 ) -> Result<Block, BlockChainError> {
-    let block = db
-        .remove_block(block_hash)
-        .map_err(BlockChainError::FailedToRemoveBlock)?;
+    // let block = db
+    //     .remove_block(block_hash)
+    //     .map_err(BlockChainError::FailedToRemoveBlock)?;
 
-    for tx in &block.transactions {
-        revert_tx(tx, db)?;
-    }
+    // for tx in &block.transactions {
+    //     revert_tx(tx, db)?;
+    // }
 
-    let block_recovery = recovery_store
-        .remove(&block_hash)
-        .unwrap_or_else(|| unreachable!("Block recovery data not found"));
+    // let block_recovery = recovery_store
+    //     .remove(&block_hash)
+    //     .unwrap_or_else(|| unreachable!("Block recovery data not found"));
 
-    for (tx_id, output, idx) in block_recovery.outputs {
-        db.insert_tx_output(tx_id.inner(), idx, &output)
-            .map_err(BlockChainError::FailedToInsertTransactionOutput)?;
-    }
+    // for (tx_id, output, idx) in block_recovery.outputs {
+    //     db.insert_tx_output(tx_id.inner(), idx, &output)
+    //         .map_err(BlockChainError::FailedToInsertTransactionOutput)?;
+    // }
 
-    Ok(block)
+    // Ok(block)
+
+    todo!()
 }
 
-fn revert_tx(tx: &Transaction, db: &Database) -> Result<(), BlockChainError> {
-    for idx in 0..tx.outputs.len() {
-        db.remove_tx_output(tx.id.inner(), idx)
-            .map_err(BlockChainError::FailedToRemoveTransactionOutput)?;
-    }
+fn revert_tx(_tx: &Transaction, _db: &Database) -> Result<(), BlockChainError> {
+    // for idx in 0..tx.outputs.len() {
+    //     db.remove_tx_output(tx.id.inner(), idx)
+    //         .map_err(BlockChainError::FailedToRemoveTransactionOutput)?;
+    // }
 
-    Ok(())
+    // Ok(())
+
+    todo!()
 }
 
 /// Validates a block.
@@ -180,5 +199,6 @@ fn now_secs() -> u64 {
 /// from the state data to recover it in case of a reorg.
 #[derive(Debug, Clone, Default)]
 pub struct BlockRecoveryData {
-    outputs: Vec<(TransactionId, TransactionOutput, usize)>,
+    // todo [sab] use `TransactionId`?
+    outputs: Vec<(Hash256, TransactionOutput, usize)>,
 }

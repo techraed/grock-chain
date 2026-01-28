@@ -63,6 +63,8 @@ pub enum CodecError {
 pub enum DatabaseError {
     #[error("Failed to open database: {0}")]
     OpenFailed(sled::Error),
+    #[error("Database transaction failed: {0:?}")]
+    TransactionFailed(Box<sled::transaction::TransactionError<Self>>),
 
     // Block related errors
     #[error("Failed to get the block {0}")]
@@ -102,12 +104,8 @@ pub enum BlockChainError {
     InvalidTransaction(Box<(Hash256, TransactionError)>),
     #[error("Failed to serialize block: {0}")]
     FailedBlockSerialization(CodecError),
-    #[error("Failed to store block to db: {0}")]
-    FailedToStoreBlock(DatabaseError),
-    #[error("Failed to remove block from db: {0}")]
-    FailedToRemoveBlock(DatabaseError),
-    #[error("Failed to insert transaction output: {0}")]
-    FailedToInsertTransactionOutput(DatabaseError),
-    #[error("Failed to remove transaction output: {0}")]
-    FailedToRemoveTransactionOutput(DatabaseError),
+    #[error("Failed block {0:?} application: {1:?}")]
+    FailedToApplyBlock(Hash256, DatabaseError),
+    #[error("Failed block {0:?} revert: {1:?}")]
+    FailedToRevertBlock(Hash256, DatabaseError),
 }
