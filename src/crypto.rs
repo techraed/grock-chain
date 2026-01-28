@@ -217,7 +217,7 @@ impl Signature {
 /// SHA-256 hash wrapper.
 ///
 /// Basically a newtype around a 32-byte array representing a SHA-256 hash.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Hash256([u8; 32]);
 
 impl Hash256 {
