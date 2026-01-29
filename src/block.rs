@@ -40,7 +40,7 @@ pub fn apply_block(
         .transactional_ops(data_operations)
         .map_err(|db_err| BlockChainError::FailedToApplyBlock(block_hash, db_err))?;
 
-    // todo [sab] recovery storage is tightly connected to transaction. It must be changed even inside the transaction
+    // TODO: issue #11
     // Store removed data for recovery in case of a reorg.
     for outcome in outcomes {
         let DatabaseOperationOutcome::RemoveTxOutput { tx_id, idx, output } = outcome else {
@@ -69,7 +69,7 @@ fn apply_tx(tx: &Transaction) -> Result<Vec<DatabaseOperation>, BlockChainError>
     }
 
     for (idx, output) in tx.outputs.iter().enumerate() {
-        // todo [sab] get rid of clone
+        // TODO: issue #12
         data_operations.push(DatabaseOperation::InsertTxOutput {
             tx_id: tx.id.inner(),
             idx,

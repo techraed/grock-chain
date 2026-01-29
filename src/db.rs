@@ -90,7 +90,7 @@ impl Database {
             return Ok(Vec::new());
         }
 
-        // todo [sab] it has copy-paste smell with other fns in Database
+        // TODO: issue #13
         let run_transaction = |trees: (&Tree, &Tree), ops: Vec<DatabaseOperation>| {
             <(&Tree, &Tree) as Transactional<DatabaseError>>::transaction(
                 &trees,
