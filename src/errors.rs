@@ -3,7 +3,7 @@
 
 //! Error definitions for Grok Chain.
 
-// TODO [sab]:
+// TODO:
 // 1. Huge design mistake - every error depends too much on underlying error type
 // 2. Database errors aren't unique. But uniting them makes it hard to identify the exact error.
 
@@ -89,6 +89,19 @@ pub enum DatabaseError {
     FailedTxOutputSerialization(Hash256, CodecError),
     #[error("Failed to insert transaction output into database: {0}")]
     FailedTxOutputInsertion(sled::Error),
+}
+
+impl DatabaseError {
+    #[cfg(test)]
+    pub fn transaction_inner_error(&self) -> Option<&Self> {
+        if let DatabaseError::TransactionFailed(inner) = self
+            && let sled::transaction::TransactionError::Abort(db_err) = &**inner
+        {
+            Some(db_err)
+        } else {
+            None
+        }
+    }
 }
 
 /// Block chain related errors.

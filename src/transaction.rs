@@ -19,14 +19,14 @@ use serde::{Deserialize, Serialize};
 /// The name is inspired by Robert A. Heinlein, a science fiction author, who
 /// actually coined the term "grok", which stands for "to understand deeply and
 /// intuitively".
-const HEINLEIN: u64 = 1;
+pub const HEINLEIN: u64 = 1;
 
 /// Grok is the main currency unit.
 ///
 /// 1 Grok = 1,000,000,000 Heinleins.
 /// Heinlein is needed to avoid floating point precision issues.
 /// So 0.000000001 Grok = 1 Heinlein.
-const GROK: u64 = 1_000_000_000 * HEINLEIN;
+pub const GROK: u64 = 1_000_000_000 * HEINLEIN;
 
 /// Validates a transaction.
 ///
@@ -140,7 +140,7 @@ impl Transaction {
 ///
 /// *Note*: The identifier isn't possible to be instantiated directly, only through
 /// creating a transaction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TransactionId(Hash256);
 
 impl TransactionId {

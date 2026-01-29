@@ -17,6 +17,7 @@ use sled::{
     transaction::{ConflictableTransactionError, TransactionalTree},
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DatabaseOperation {
     InsertBlock {
         block_hash: Hash256,
@@ -36,10 +37,11 @@ pub enum DatabaseOperation {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DatabaseOperationOutcome {
-    InsertBlock,
+    InsertBlock(Hash256),
     RemoveBlock(Block),
-    InsertTxOutput,
+    InsertTxOutput(Hash256, usize),
     RemoveTxOutput {
         tx_id: Hash256,
         idx: usize,
@@ -67,6 +69,14 @@ impl Database {
         })
     }
 
+    pub fn blocks_count(&self) -> usize {
+        self.blocks_tree.iter().count()
+    }
+
+    pub fn transactions_count(&self) -> usize {
+        self.txs_tree.iter().count()
+    }
+
     pub fn transactional_ops(
         &self,
         ops: Vec<DatabaseOperation>,
@@ -76,6 +86,11 @@ impl Database {
             txs_tree,
         } = &self;
 
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // todo [sab] it has copy-paste smell with other fns in Database
         let run_transaction = |trees: (&Tree, &Tree), ops: Vec<DatabaseOperation>| {
             <(&Tree, &Tree) as Transactional<DatabaseError>>::transaction(
                 &trees,
@@ -84,26 +99,25 @@ impl Database {
                     for op in &ops {
                         match op {
                             DatabaseOperation::InsertBlock { block_hash, block } => {
+                                let block_hash = *block_hash;
                                 let key = block_hash.to_bytes();
                                 let block_bytes = codec::encode(&block).map_err(|codec_err| {
-                                    DatabaseError::FailedBlockSerialization(*block_hash, codec_err)
+                                    DatabaseError::FailedBlockSerialization(block_hash, codec_err)
                                 })?;
+                                let _ = blocks_tree.insert(&key, block_bytes)?;
 
-                                let _ = blocks_tree.insert(&key, block_bytes).expect("todo [sab]");
-
-                                outcomes.push(DatabaseOperationOutcome::InsertBlock);
+                                outcomes.push(DatabaseOperationOutcome::InsertBlock(block_hash));
                             }
                             DatabaseOperation::RemoveBlock { block_hash } => {
+                                let block_hash = *block_hash;
                                 let key = block_hash.to_bytes();
                                 let block_bytes = blocks_tree
                                     .remove(&key)?
-                                    .ok_or(DatabaseError::BlockNotFound(*block_hash))?;
-
+                                    .ok_or(DatabaseError::BlockNotFound(block_hash))?;
                                 let block = codec::decode::<Block>(block_bytes.as_ref()).map_err(
                                     |codec_err| {
                                         DatabaseError::FailedBlockDeserialization(
-                                            *block_hash,
-                                            codec_err,
+                                            block_hash, codec_err,
                                         )
                                     },
                                 )?;
@@ -111,14 +125,15 @@ impl Database {
                                 outcomes.push(DatabaseOperationOutcome::RemoveBlock(block));
                             }
                             DatabaseOperation::InsertTxOutput { tx_id, idx, output } => {
-                                let key = Self::tx_key(*tx_id, *idx);
+                                let (tx_id, idx) = (*tx_id, *idx);
+                                let key = Self::tx_key(tx_id, idx);
                                 let output_bytes = codec::encode(&output).map_err(|codec_err| {
-                                    DatabaseError::FailedTxOutputSerialization(*tx_id, codec_err)
+                                    DatabaseError::FailedTxOutputSerialization(tx_id, codec_err)
                                 })?;
 
                                 let _ = txs_tree.insert(key, output_bytes)?;
 
-                                outcomes.push(DatabaseOperationOutcome::InsertTxOutput);
+                                outcomes.push(DatabaseOperationOutcome::InsertTxOutput(tx_id, idx));
                             }
                             DatabaseOperation::RemoveTxOutput { tx_id, idx } => {
                                 let (tx_id, idx) = (*tx_id, *idx);
@@ -424,5 +439,147 @@ mod tests {
 
         let retrieved = db.tx_output(tx_id, 0).expect("Failed to retrieve tx");
         assert_eq!(retrieved.amount, 2000);
+    }
+
+    // Checks transactional operations with 4 scenarios:
+    // 1. Successful transaction with multiple operations (changed state)
+    // 2. Failed transaction with rollback (no state change)
+    // 3. Successful transaction with same operations as 1 (no state change)
+    // 4. Successful transaction with only one tree changed (partially changed state)
+    #[test]
+    fn transactional_ops() {
+        let db = Database::create_test_db();
+
+        // Transaction 1: Insert block and tx output (should succeed)
+        let block_hash_1 = Hash256::new(b"block_tx_1");
+        let block_1 = dummy_block(1, 100);
+        let tx_id_1 = Hash256::new(b"tx_txops_1");
+        let output_1 = dummy_tx_output(500, 5);
+
+        let ops_1 = vec![
+            DatabaseOperation::InsertBlock {
+                block_hash: block_hash_1,
+                block: block_1.clone(),
+            },
+            DatabaseOperation::InsertTxOutput {
+                tx_id: tx_id_1,
+                idx: 0,
+                output: output_1.clone(),
+            },
+        ];
+
+        let res = db.transactional_ops(ops_1.clone());
+        assert!(res.is_ok());
+        assert_eq!(
+            res.expect("checked"),
+            vec![
+                DatabaseOperationOutcome::InsertBlock(block_hash_1),
+                DatabaseOperationOutcome::InsertTxOutput(tx_id_1, 0)
+            ]
+        );
+        assert!(db.block(block_hash_1).is_ok());
+        assert!(db.tx_output(tx_id_1, 0).is_ok());
+        assert_eq!(db.txs_tree.len(), 1);
+        assert_eq!(db.blocks_tree.len(), 1);
+
+        let tx_state_after_tx1 = db.txs_tree.checksum().expect("failed to get checksum");
+        let block_state_after_tx1 = db.blocks_tree.checksum().expect("failed to get checksum");
+
+        // Transaction 2: Try to remove non-existent block (should fail and rollback)
+        let non_existent_block_hash = Hash256::new(b"nonexistent");
+        let tx_id_2 = Hash256::new(b"tx_txops_2");
+        let output_2 = dummy_tx_output(1000, 6);
+
+        let ops_2 = vec![
+            DatabaseOperation::InsertTxOutput {
+                tx_id: tx_id_2,
+                idx: 1,
+                output: output_2,
+            },
+            DatabaseOperation::RemoveBlock {
+                block_hash: non_existent_block_hash,
+            },
+        ];
+
+        let res = db.transactional_ops(ops_2);
+        assert!(res.is_err());
+        let res_err = res.expect_err("checked");
+        let DatabaseError::BlockNotFound(block_hash) = res_err
+            .transaction_inner_error()
+            .expect("Expected getting transaction inner error")
+        else {
+            panic!("Expected BlockNotFound error");
+        };
+        assert_eq!(block_hash, &non_existent_block_hash);
+        // Check previous state
+        let tx_state_after_tx2 = db.txs_tree.checksum().expect("failed to get checksum");
+        let block_state_after_tx2 = db.blocks_tree.checksum().expect("failed to get checksum");
+        assert_eq!(tx_state_after_tx1, tx_state_after_tx2);
+        assert_eq!(block_state_after_tx1, block_state_after_tx2);
+        assert_eq!(db.txs_tree.len(), 1);
+        assert_eq!(db.blocks_tree.len(), 1);
+
+        assert!(db.block(block_hash_1).is_ok());
+        assert!(db.tx_output(tx_id_1, 0).is_ok());
+
+        // Check no new tx output was inserted
+        assert!(db.tx_output(tx_id_2, 1).is_err());
+
+        // Transaction 3: Run same transaction as 1 again (should succeed)
+        let res = db.transactional_ops(ops_1);
+        assert!(res.is_ok());
+        assert_eq!(
+            res.expect("checked"),
+            vec![
+                DatabaseOperationOutcome::InsertBlock(block_hash_1),
+                DatabaseOperationOutcome::InsertTxOutput(tx_id_1, 0)
+            ]
+        );
+
+        // Check nothings has changed
+        let tx_state_after_tx3 = db.txs_tree.checksum().expect("failed to get checksum");
+        let block_state_after_tx3 = db.blocks_tree.checksum().expect("failed to get checksum");
+        assert_eq!(tx_state_after_tx1, tx_state_after_tx3);
+        assert_eq!(block_state_after_tx1, block_state_after_tx3);
+        assert_eq!(db.txs_tree.len(), 1);
+        assert_eq!(db.blocks_tree.len(), 1);
+        assert!(db.block(block_hash_1).is_ok());
+        assert!(db.tx_output(tx_id_1, 0).is_ok());
+
+        // Transaction 4: Insert another block (should succeed)
+        let block_4 = dummy_block(3, 300);
+        let block_hash_4 = Hash256::new(b"block_hash_3");
+        let ops_4 = vec![DatabaseOperation::InsertBlock {
+            block_hash: block_hash_4,
+            block: block_4,
+        }];
+
+        let res = db.transactional_ops(ops_4);
+        assert!(res.is_ok());
+        assert_eq!(
+            res.expect("checked"),
+            vec![DatabaseOperationOutcome::InsertBlock(block_hash_4)]
+        );
+
+        // Check the state: block state changed, tx state is the same
+        let tx_state_after_tx4 = db.txs_tree.checksum().expect("failed to get checksum");
+        let block_state_after_tx4 = db.blocks_tree.checksum().expect("failed to get checksum");
+
+        assert_eq!(tx_state_after_tx1, tx_state_after_tx4);
+        assert_ne!(block_state_after_tx1, block_state_after_tx4);
+        assert!(db.block(block_hash_4).is_ok());
+        assert!(db.tx_output(tx_id_1, 0).is_ok());
+        assert_eq!(db.blocks_tree.len(), 2);
+        assert_eq!(db.txs_tree.len(), 1);
+    }
+
+    #[test]
+    fn transactional_ops_empty_operations() {
+        let db = Database::create_test_db();
+
+        let ops = vec![];
+        let result = db.transactional_ops(ops);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 0);
     }
 }
