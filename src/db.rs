@@ -13,9 +13,83 @@ use crate::{
     block::Block, codec, crypto::Hash256, errors::DatabaseError, transaction::TransactionOutput,
 };
 use sled::{
-    Transactional, Tree,
-    transaction::{ConflictableTransactionError, TransactionalTree},
+    IVec, Transactional, Tree,
+    transaction::{ConflictableTransactionError, TransactionalTree, UnabortableTransactionError},
 };
+
+/// A trait to abstract over `sled::Tree` and `sled::transaction::TransactionalTree`.
+///
+/// This allows writing generic code that works with both transactional and
+/// non-transactional tree operations, avoiding duplication of serialization,
+/// deserialization, and key handling logic.
+trait DbTreeOps {
+    type Error;
+
+    fn insert<K, V>(&self, key: K, value: V) -> Result<Option<IVec>, Self::Error>
+    where
+        K: AsRef<[u8]> + Into<IVec>,
+        V: Into<IVec>;
+
+    fn remove<K>(&self, key: K) -> Result<Option<IVec>, Self::Error>
+    where
+        K: AsRef<[u8]> + Into<IVec>;
+
+    fn get<K>(&self, key: K) -> Result<Option<IVec>, Self::Error>
+    where
+        K: AsRef<[u8]>;
+}
+
+impl DbTreeOps for Tree {
+    type Error = sled::Error;
+
+    fn insert<K, V>(&self, key: K, value: V) -> Result<Option<IVec>, Self::Error>
+    where
+        K: AsRef<[u8]> + Into<IVec>,
+        V: Into<IVec>,
+    {
+        Tree::insert(self, key, value)
+    }
+
+    fn remove<K>(&self, key: K) -> Result<Option<IVec>, Self::Error>
+    where
+        K: AsRef<[u8]> + Into<IVec>,
+    {
+        Tree::remove(self, key)
+    }
+
+    fn get<K>(&self, key: K) -> Result<Option<IVec>, Self::Error>
+    where
+        K: AsRef<[u8]>,
+    {
+        Tree::get(self, key)
+    }
+}
+
+impl DbTreeOps for TransactionalTree {
+    type Error = UnabortableTransactionError;
+
+    fn insert<K, V>(&self, key: K, value: V) -> Result<Option<IVec>, Self::Error>
+    where
+        K: AsRef<[u8]> + Into<IVec>,
+        V: Into<IVec>,
+    {
+        TransactionalTree::insert(self, key, value)
+    }
+
+    fn remove<K>(&self, key: K) -> Result<Option<IVec>, Self::Error>
+    where
+        K: AsRef<[u8]> + Into<IVec>,
+    {
+        TransactionalTree::remove(self, key)
+    }
+
+    fn get<K>(&self, key: K) -> Result<Option<IVec>, Self::Error>
+    where
+        K: AsRef<[u8]>,
+    {
+        TransactionalTree::get(self, key)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DatabaseOperation {
