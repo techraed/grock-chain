@@ -27,12 +27,12 @@ trait DbTreeOps {
 
     fn insert<K, V>(&self, key: K, value: V) -> Result<Option<IVec>, Self::Error>
     where
-        K: AsRef<[u8]> + Into<IVec>,
+        K: AsRef<[u8]>,
         V: Into<IVec>;
 
     fn remove<K>(&self, key: K) -> Result<Option<IVec>, Self::Error>
     where
-        K: AsRef<[u8]> + Into<IVec>;
+        K: AsRef<[u8]>;
 
     fn get<K>(&self, key: K) -> Result<Option<IVec>, Self::Error>
     where
@@ -44,7 +44,7 @@ impl DbTreeOps for Tree {
 
     fn insert<K, V>(&self, key: K, value: V) -> Result<Option<IVec>, Self::Error>
     where
-        K: AsRef<[u8]> + Into<IVec>,
+        K: AsRef<[u8]>,
         V: Into<IVec>,
     {
         Tree::insert(self, key, value)
@@ -52,7 +52,7 @@ impl DbTreeOps for Tree {
 
     fn remove<K>(&self, key: K) -> Result<Option<IVec>, Self::Error>
     where
-        K: AsRef<[u8]> + Into<IVec>,
+        K: AsRef<[u8]>,
     {
         Tree::remove(self, key)
     }
@@ -70,17 +70,23 @@ impl DbTreeOps for TransactionalTree {
 
     fn insert<K, V>(&self, key: K, value: V) -> Result<Option<IVec>, Self::Error>
     where
-        K: AsRef<[u8]> + Into<IVec>,
+        K: AsRef<[u8]>,
         V: Into<IVec>,
     {
-        TransactionalTree::insert(self, key, value)
+        // TransactionalTree requires K: Into<IVec>, but our key types ([u8; 32], Vec<u8>)
+        // satisfy this bound, so we convert to IVec first
+        let key_ivec: IVec = IVec::from(key.as_ref());
+        TransactionalTree::insert(self, key_ivec, value)
     }
 
     fn remove<K>(&self, key: K) -> Result<Option<IVec>, Self::Error>
     where
-        K: AsRef<[u8]> + Into<IVec>,
+        K: AsRef<[u8]>,
     {
-        TransactionalTree::remove(self, key)
+        // TransactionalTree requires K: Into<IVec>, but our key types ([u8; 32], Vec<u8>)
+        // satisfy this bound, so we convert to IVec first
+        let key_ivec: IVec = IVec::from(key.as_ref());
+        TransactionalTree::remove(self, key_ivec)
     }
 
     fn get<K>(&self, key: K) -> Result<Option<IVec>, Self::Error>
@@ -327,6 +333,124 @@ impl Database {
 
     fn tx_key(tx_id: Hash256, idx: usize) -> Vec<u8> {
         [tx_id.to_bytes().as_ref(), &idx.to_be_bytes()].concat()
+    }
+
+    /// Helper to insert a block into any tree implementing `DbTreeOps`.
+    ///
+    /// This extracts the common logic of:
+    /// 1. Deriving the key from block_hash
+    /// 2. Serializing the block
+    /// 3. Inserting into the tree
+    ///
+    /// Error mapping is delegated to the caller via closures to preserve
+    /// context-specific error handling.
+    fn insert_block_inner<T, E, SerErr, InsertErr>(
+        tree: &T,
+        block_hash: Hash256,
+        block: &Block,
+        map_serialization_err: SerErr,
+        map_insert_err: InsertErr,
+    ) -> Result<(), E>
+    where
+        T: DbTreeOps,
+        SerErr: FnOnce(crate::errors::CodecError) -> E,
+        InsertErr: FnOnce(T::Error) -> E,
+    {
+        let key = block_hash.to_bytes();
+        let block_bytes = codec::encode(block).map_err(map_serialization_err)?;
+        let _ = tree.insert(key, block_bytes).map_err(map_insert_err)?;
+        Ok(())
+    }
+
+    /// Helper to remove a block from any tree implementing `DbTreeOps`.
+    ///
+    /// This extracts the common logic of:
+    /// 1. Deriving the key from block_hash
+    /// 2. Removing from the tree
+    /// 3. Checking if the block existed
+    /// 4. Deserializing the block bytes
+    ///
+    /// Error mapping is delegated to the caller via closures to preserve
+    /// context-specific error handling.
+    fn remove_block_inner<T, E, RemoveErr, NotFoundErr, DeserErr>(
+        tree: &T,
+        block_hash: Hash256,
+        map_remove_err: RemoveErr,
+        map_not_found_err: NotFoundErr,
+        map_deserialization_err: DeserErr,
+    ) -> Result<Block, E>
+    where
+        T: DbTreeOps,
+        RemoveErr: FnOnce(T::Error) -> E,
+        NotFoundErr: FnOnce() -> E,
+        DeserErr: FnOnce(crate::errors::CodecError) -> E,
+    {
+        let key = block_hash.to_bytes();
+        let block_bytes = tree
+            .remove(key)
+            .map_err(map_remove_err)?
+            .ok_or_else(map_not_found_err)?;
+        codec::decode::<Block>(block_bytes.as_ref()).map_err(map_deserialization_err)
+    }
+
+    /// Helper to insert a transaction output into any tree implementing `DbTreeOps`.
+    ///
+    /// This extracts the common logic of:
+    /// 1. Deriving the key from tx_id and idx
+    /// 2. Serializing the output
+    /// 3. Inserting into the tree
+    ///
+    /// Error mapping is delegated to the caller via closures to preserve
+    /// context-specific error handling.
+    fn insert_tx_output_inner<T, E, SerErr, InsertErr>(
+        tree: &T,
+        tx_id: Hash256,
+        idx: usize,
+        output: &TransactionOutput,
+        map_serialization_err: SerErr,
+        map_insert_err: InsertErr,
+    ) -> Result<(), E>
+    where
+        T: DbTreeOps,
+        SerErr: FnOnce(crate::errors::CodecError) -> E,
+        InsertErr: FnOnce(T::Error) -> E,
+    {
+        let key = Self::tx_key(tx_id, idx);
+        let output_bytes = codec::encode(output).map_err(map_serialization_err)?;
+        let _ = tree.insert(key, output_bytes).map_err(map_insert_err)?;
+        Ok(())
+    }
+
+    /// Helper to remove a transaction output from any tree implementing `DbTreeOps`.
+    ///
+    /// This extracts the common logic of:
+    /// 1. Deriving the key from tx_id and idx
+    /// 2. Removing from the tree
+    /// 3. Checking if the output existed
+    /// 4. Deserializing the output bytes
+    ///
+    /// Error mapping is delegated to the caller via closures to preserve
+    /// context-specific error handling.
+    fn remove_tx_output_inner<T, E, RemoveErr, NotFoundErr, DeserErr>(
+        tree: &T,
+        tx_id: Hash256,
+        idx: usize,
+        map_remove_err: RemoveErr,
+        map_not_found_err: NotFoundErr,
+        map_deserialization_err: DeserErr,
+    ) -> Result<TransactionOutput, E>
+    where
+        T: DbTreeOps,
+        RemoveErr: FnOnce(T::Error) -> E,
+        NotFoundErr: FnOnce() -> E,
+        DeserErr: FnOnce(crate::errors::CodecError) -> E,
+    {
+        let key = Self::tx_key(tx_id, idx);
+        let output_bytes = tree
+            .remove(key)
+            .map_err(map_remove_err)?
+            .ok_or_else(map_not_found_err)?;
+        codec::decode::<TransactionOutput>(output_bytes.as_ref()).map_err(map_deserialization_err)
     }
 }
 
