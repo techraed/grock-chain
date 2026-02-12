@@ -1,6 +1,13 @@
 // Copyright 2025 Sabaun Taraki
 // SPDX-License-Identifier: Apache-2.0
 
+mod block;
+mod codec;
+mod crypto;
+mod db;
+mod errors;
+mod transaction;
+
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -130,18 +137,6 @@ fn validate_block(
 /// Id of the network actor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Address(u64);
-
-impl Address {
-    /// Generates a new random address.
-    pub fn generate() -> Self {
-        use rand::Rng;
-
-        let mut rand = rand::rng();
-        let id: u64 = rand.random();
-
-        Address(id)
-    }
-}
 
 /// A transaction sending value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
