@@ -17,6 +17,20 @@ use sled::{
     transaction::{ConflictableTransactionError, TransactionalTree},
 };
 
+/// Represents a single database operation in the Grok Chain blockchain.
+///
+/// This enum defines all possible state mutations that can be performed on the blockchain
+/// database. Operations are designed to be composable - multiple operations can be batched
+/// and executed atomically via `Database::transactional_ops`.
+///
+/// # Design Philosophy
+///
+/// Each variant represents a **pure data transformation** without side effects. Operations
+/// are first-class values that can be collected, inspected, and transformed before execution.
+/// This enables powerful patterns like:
+/// - Batching multiple operations for atomic execution
+/// - Dry-running operations without database mutations
+/// - Building complex multi-step transactions with rollback semantics
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DatabaseOperation {
     InsertBlock {
@@ -37,6 +51,16 @@ pub enum DatabaseOperation {
     },
 }
 
+/// Represents the outcome of a successfully executed database operation.
+///
+/// Each variant corresponds to a `DatabaseOperation` variant and captures relevant
+/// information about what was changed in the database. Outcomes enable:
+/// - Recovery mechanisms (storing removed data for potential rollback)
+/// - Audit trails (tracking what changed in each transaction)
+/// - State verification (confirming operations had expected effects)
+///
+/// For operations that remove data (like `RemoveTxOutput`), the outcome includes the
+/// removed data itself, which is critical for blockchain reorganizations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DatabaseOperationOutcome {
     InsertBlock(Hash256),
@@ -49,12 +73,47 @@ pub enum DatabaseOperationOutcome {
     },
 }
 
+/// Database for storing blockchain state in the Grok Chain.
+///
+/// The database uses a key-value store (sled) with two separate trees:
+/// - `blocks_tree`: Stores blocks indexed by their hash
+/// - `txs_tree`: Stores unspent transaction outputs (UTXO set) indexed by (tx_id, output_index)
+///
+/// # UTXO Model
+///
+/// The database implements a UTXO (Unspent Transaction Output) model where:
+/// - Transaction outputs are added when blocks are applied
+/// - Outputs are removed when spent by subsequent transactions
+/// - Only unspent outputs remain in `txs_tree`, forming the current UTXO set
+///
+/// # Transactional Guarantees
+///
+/// All multi-operation updates use database transactions to ensure atomicity. Either all
+/// operations in a batch succeed, or none do. This is critical for maintaining blockchain
+/// consistency during block application, reversion, and reorganizations.
 pub struct Database {
     blocks_tree: sled::Tree,
     txs_tree: sled::Tree,
 }
 
 impl Database {
+    /// Creates a new database instance at the specified path.
+    ///
+    /// Opens a sled database at the given filesystem path and initializes two trees:
+    /// - "blocks": For storing blockchain blocks
+    /// - "tx_outputs": For storing the UTXO set
+    ///
+    /// If the path doesn't exist, a new database is created. If it exists, the existing
+    /// database is opened, preserving all previously stored data.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Filesystem path where the database should be stored
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Database)` - Successfully opened/created database
+    /// * `Err(DatabaseError::OpenFailed)` - Failed to open database or trees
     pub fn new(path: &str) -> Result<Self, DatabaseError> {
         let db = sled::open(path).map_err(DatabaseError::OpenFailed)?;
 
@@ -69,14 +128,92 @@ impl Database {
         })
     }
 
+    /// Returns the total number of blocks stored in the database.
+    ///
+    /// This count represents all blocks in the blockchain, including the genesis block.
     pub fn blocks_count(&self) -> usize {
         self.blocks_tree.iter().count()
     }
 
+    /// Returns the total number of unspent transaction outputs (UTXOs) in the database.
+    ///
+    /// This count represents the current UTXO set - all outputs that have been created
+    /// but not yet spent. It does not include spent outputs, which are removed from the database.
     pub fn transactions_count(&self) -> usize {
         self.txs_tree.iter().count()
     }
 
+    /// Executes multiple database operations atomically in a single transaction.
+    ///
+    /// This is the **core primitive** for blockchain state mutations. All operations are
+    /// executed within a database transaction, ensuring that either all succeed or none do.
+    /// This atomic behavior is essential for maintaining blockchain consistency.
+    ///
+    /// # Why Transactional Operations?
+    ///
+    /// Blockchains require **all-or-nothing semantics** for state changes:
+    /// - A block is either fully applied or not applied at all
+    /// - A reorganization either fully succeeds or leaves the chain unchanged
+    /// - Partial state changes would corrupt the blockchain
+    ///
+    /// By batching operations and executing them transactionally, we achieve:
+    ///
+    /// **Atomicity**: All operations succeed together or fail together. No partial updates.
+    ///
+    /// **Consistency**: The blockchain state is always valid at transaction boundaries.
+    /// Invalid intermediate states never persist.
+    ///
+    /// **Isolation**: Concurrent access (future extension) won't see partial updates.
+    ///
+    /// **Durability**: Once a transaction commits, changes are permanent even if the system crashes.
+    ///
+    /// # Functional Design Philosophy
+    ///
+    /// This method embodies a **functional approach** to state management:
+    ///
+    /// 1. **Separate description from execution**: Operations are data structures describing
+    ///    desired changes, not imperative commands that execute immediately.
+    ///
+    /// 2. **Batch before commit**: Collect all operations first, then execute atomically.
+    ///    This enables inspection, validation, and optimization before any mutations occur.
+    ///
+    /// 3. **Explicit outcomes**: Return structured data about what changed, enabling callers
+    ///    to maintain recovery data, logs, or other derived state.
+    ///
+    /// 4. **Composability**: Operations can be built incrementally from smaller pieces,
+    ///    combined, and executed as a single unit of work.
+    ///
+    /// This design makes blockchain reorganizations tractable - we can collect operations
+    /// for reverting blocks and applying new ones, then execute everything atomically.
+    ///
+    /// # Arguments
+    ///
+    /// * `ops` - Vector of operations to execute atomically. Can be empty (returns empty outcomes).
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<DatabaseOperationOutcome>)` - All operations succeeded. Outcomes correspond
+    ///   to input operations in order.
+    /// * `Err(DatabaseError::TransactionFailed)` - Transaction was aborted due to an error.
+    ///   Database remains unchanged.
+    ///
+    /// # Example
+    ///
+    /// ```text
+    /// let ops = vec![
+    ///     DatabaseOperation::RemoveTxOutput { tx_id: old_tx, idx: 0 },
+    ///     DatabaseOperation::InsertTxOutput { tx_id: new_tx, idx: 0, output: new_output },
+    ///     DatabaseOperation::InsertBlock { block_hash: hash, block: block },
+    /// ];
+    ///
+    /// // All three operations execute atomically
+    /// let outcomes = db.transactional_ops(ops)?;
+    ///
+    /// // Extract removed output from outcomes for recovery data
+    /// if let DatabaseOperationOutcome::RemoveTxOutput { output, .. } = &outcomes[0] {
+    ///     recovery_store.push(output.clone());
+    /// }
+    /// ```
     pub fn transactional_ops(
         &self,
         ops: Vec<DatabaseOperation>,
@@ -167,6 +304,18 @@ impl Database {
             .map_err(|tx_err| DatabaseError::TransactionFailed(Box::new(tx_err)))
     }
 
+    /// Retrieves a block from the database by its hash.
+    ///
+    /// # Arguments
+    ///
+    /// * `block_hash` - The hash of the block to retrieve
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Block)` - Block successfully retrieved and deserialized
+    /// * `Err(DatabaseError::BlockNotFound)` - No block exists with this hash
+    /// * `Err(DatabaseError::CannotGetBlock)` - Database read error
+    /// * `Err(DatabaseError::FailedBlockDeserialization)` - Block data is corrupted
     pub fn block(&self, block_hash: Hash256) -> Result<Block, DatabaseError> {
         let key = block_hash.to_bytes();
         let block_bytes = self
@@ -179,6 +328,20 @@ impl Database {
             .map_err(|codec_err| DatabaseError::FailedBlockDeserialization(block_hash, codec_err))
     }
 
+    /// Inserts a block into the database.
+    ///
+    /// If a block with the same hash already exists, it is overwritten.
+    ///
+    /// # Arguments
+    ///
+    /// * `block_hash` - The hash of the block (used as the database key)
+    /// * `block` - The block to store
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Block successfully serialized and stored
+    /// * `Err(DatabaseError::FailedBlockSerialization)` - Block serialization failed
+    /// * `Err(DatabaseError::FailedBlockInsertion)` - Database write error
     pub fn insert_block(&self, block_hash: Hash256, block: Block) -> Result<(), DatabaseError> {
         let key = block_hash.to_bytes();
         let block_bytes = codec::encode(&block)
@@ -191,6 +354,22 @@ impl Database {
         Ok(())
     }
 
+    /// Retrieves a transaction output from the UTXO set.
+    ///
+    /// Outputs are indexed by transaction ID and output index. Only unspent outputs
+    /// are stored in the database - spent outputs are removed.
+    ///
+    /// # Arguments
+    ///
+    /// * `tx_id` - The transaction ID that created this output
+    /// * `idx` - The index of the output within the transaction (0-based)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(TransactionOutput)` - Output successfully retrieved and deserialized
+    /// * `Err(DatabaseError::TransactionOutputNotFound)` - Output doesn't exist (never created or already spent)
+    /// * `Err(DatabaseError::CannotGetTxOutput)` - Database read error
+    /// * `Err(DatabaseError::FailedTxOutputDeserialization)` - Output data is corrupted
     pub fn tx_output(
         &self,
         tx_id: Hash256,
@@ -207,6 +386,21 @@ impl Database {
             .map_err(|codec_err| DatabaseError::FailedTxOutputDeserialization(tx_id, codec_err))
     }
 
+    /// Inserts a transaction output into the UTXO set.
+    ///
+    /// If an output with the same (tx_id, idx) already exists, it is overwritten.
+    ///
+    /// # Arguments
+    ///
+    /// * `tx_id` - The transaction ID that created this output
+    /// * `idx` - The index of the output within the transaction
+    /// * `output` - The transaction output to store
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Output successfully serialized and stored
+    /// * `Err(DatabaseError::FailedTxOutputSerialization)` - Output serialization failed
+    /// * `Err(DatabaseError::FailedTxOutputInsertion)` - Database write error
     pub fn insert_tx_output(
         &self,
         tx_id: Hash256,
@@ -223,6 +417,22 @@ impl Database {
         Ok(())
     }
 
+    /// Removes a transaction output from the UTXO set and returns it.
+    ///
+    /// This is typically used when an output is spent by a transaction. The removed
+    /// output is returned so it can be stored in recovery data for potential block reversions.
+    ///
+    /// # Arguments
+    ///
+    /// * `tx_id` - The transaction ID that created this output
+    /// * `idx` - The index of the output within the transaction
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(TransactionOutput)` - Output successfully removed and deserialized
+    /// * `Err(DatabaseError::TransactionOutputNotFound)` - Output doesn't exist
+    /// * `Err(DatabaseError::CannotGetTxOutput)` - Database operation error
+    /// * `Err(DatabaseError::FailedTxOutputDeserialization)` - Output data is corrupted
     pub fn remove_tx_output(
         &self,
         tx_id: Hash256,
@@ -239,6 +449,20 @@ impl Database {
             .map_err(|codec_err| DatabaseError::FailedTxOutputDeserialization(tx_id, codec_err))
     }
 
+    /// Removes a block from the database and returns it.
+    ///
+    /// This is typically used during blockchain reorganizations when reverting blocks.
+    ///
+    /// # Arguments
+    ///
+    /// * `block_hash` - The hash of the block to remove
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Block)` - Block successfully removed and deserialized
+    /// * `Err(DatabaseError::BlockNotFound)` - No block exists with this hash
+    /// * `Err(DatabaseError::CannotGetBlock)` - Database operation error
+    /// * `Err(DatabaseError::FailedBlockDeserialization)` - Block data is corrupted
     pub fn remove_block(&self, block_hash: Hash256) -> Result<Block, DatabaseError> {
         let key = block_hash.to_bytes();
         let block_bytes = self
@@ -251,6 +475,19 @@ impl Database {
             .map_err(|codec_err| DatabaseError::FailedBlockDeserialization(block_hash, codec_err))
     }
 
+    /// Constructs a database key for a transaction output.
+    ///
+    /// The key is formed by concatenating the transaction ID (32 bytes) with the
+    /// output index (8 bytes, big-endian). This ensures each output has a unique key.
+    ///
+    /// # Arguments
+    ///
+    /// * `tx_id` - The transaction ID
+    /// * `idx` - The output index
+    ///
+    /// # Returns
+    ///
+    /// A 40-byte key (32 bytes tx_id + 8 bytes idx)
     fn tx_key(tx_id: Hash256, idx: usize) -> Vec<u8> {
         [tx_id.to_bytes().as_ref(), &idx.to_be_bytes()].concat()
     }

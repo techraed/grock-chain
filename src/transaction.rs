@@ -28,14 +28,56 @@ pub const HEINLEIN: u64 = 1;
 /// So 0.000000001 Grok = 1 Heinlein.
 pub const GROK: u64 = 1_000_000_000 * HEINLEIN;
 
-/// Validates a transaction.
+/// Validates a transaction against the current blockchain state.
 ///
-/// Basically checks:
-/// 1. Inputs and outputs are non-empty.
-/// 2. Each input refers to a valid unspent output in the database.
-/// 3. Each input's signature is valid for the corresponding output's challenge data.
-/// 4. Total output amount is greater than zero.
-/// 5. Total input amount is greater than or equal to total output amount
+/// Performs comprehensive validation to ensure a transaction is well-formed and can be
+/// legally executed. This includes structural validation, cryptographic verification,
+/// and state consistency checks.
+///
+/// # Validation Steps
+///
+/// 1. **Non-empty check**: Inputs and outputs must both be non-empty
+/// 2. **UTXO existence**: Each input must refer to a valid unspent output in the database
+/// 3. **Signature verification**: Each input's signature must be valid for the corresponding
+///    output's challenge data, proving ownership
+/// 4. **Non-zero value**: Total output amount must be greater than zero
+/// 5. **Sufficient funds**: Total input amount must be ≥ total output amount
+///
+/// # Arguments
+///
+/// * `tx` - The transaction to validate
+/// * `db` - Database containing the current UTXO set
+///
+/// # Returns
+///
+/// * `Ok(())` - Transaction is valid and can be included in a block
+/// * `Err(TransactionError::EmptyTransaction)` - Transaction has no inputs or no outputs
+/// * `Err(TransactionError::TransactionOutputNotFound)` - Input references non-existent output
+/// * `Err(TransactionError::InvalidSignature)` - Signature verification failed
+/// * `Err(TransactionError::ZeroOutputTransaction)` - Total output amount is zero
+/// * `Err(TransactionError::InsufficientFunds)` - Inputs don't cover outputs
+///
+/// # Example
+///
+/// ```text
+/// Transaction validation flow:
+///   TX has 2 inputs, 3 outputs
+///   
+///   Input 0: references TX_A output 1 (100 GROK)
+///     - Check: TX_A output 1 exists in UTXO set? ✓
+///     - Check: Signature valid for TX_A output 1 challenge? ✓
+///   
+///   Input 1: references TX_B output 0 (50 GROK)
+///     - Check: TX_B output 0 exists in UTXO set? ✓
+///     - Check: Signature valid for TX_B output 0 challenge? ✓
+///   
+///   Total inputs: 150 GROK
+///   Total outputs: 140 GROK (fee: 10 GROK)
+///   Check: Total outputs > 0? ✓
+///   Check: Total inputs ≥ total outputs? ✓
+///   
+///   Result: Valid transaction
+/// ```
 pub fn validate_tx(tx: &Transaction, db: &Database) -> Result<(), TransactionError> {
     let tx_id = tx.id.inner();
     if tx.inputs.is_empty() || tx.outputs.is_empty() {

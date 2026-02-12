@@ -1,4 +1,4 @@
-// Copyright 2025 Sabaun Taraki
+// Copyright 2025-2026 Sabaun Taraki
 // SPDX-License-Identifier: Apache-2.0
 
 //! Block structure and related functionalities.
@@ -17,6 +17,71 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Applies a valid block to the blockchain.
+///
+/// This function processes a block and updates the blockchain state by:
+/// 1. Applying all transactions in the block (removing spent outputs, creating new outputs)
+/// 2. Storing the block itself in the database
+/// 3. Recording recovery data for potential blockchain reorganizations
+///
+/// # Functional Design and Transactional Approach
+///
+/// This function follows a **functional programming pattern** where state mutations are
+/// deferred until the very end. Rather than mutating the database incrementally as each
+/// transaction is processed, we:
+///
+/// 1. **Collect operations**: Build a complete list of all database operations needed
+/// 2. **Execute atomically**: Apply all operations in a single database transaction
+/// 3. **All-or-nothing semantics**: Either all operations succeed or none do
+///
+/// ## Why This Design?
+///
+/// **Atomicity Guarantees**: Blockchain state must remain consistent. If any transaction
+/// in a block is invalid or fails to apply, the entire block application must be rolled back.
+/// By collecting all operations first and executing them in a single transaction, we ensure
+/// that partial state changes never persist.
+///
+/// **Crash Recovery**: If the system crashes during block application, the database transaction
+/// ensures no partial state is written. The blockchain remains in a consistent state at block
+/// boundaries.
+///
+/// **Reorganization Support**: When blockchain forks occur, we need to revert blocks and apply
+/// alternative chains. The recovery store captures all removed data (spent outputs) during
+/// application, enabling precise reversal of state changes during reorganizations.
+///
+/// **Performance**: Batching operations reduces database round-trips and allows the underlying
+/// database (sled) to optimize the transaction execution.
+///
+/// # Arguments
+///
+/// * `block` - The block to apply to the blockchain
+/// * `db` - Database instance containing blockchain state
+/// * `recovery_store` - Map storing recovery data for each applied block, indexed by block hash.
+///   When a block is applied, any outputs removed from the UTXO set are stored here to enable
+///   block reversal during reorganizations.
+///
+/// # Returns
+///
+/// * `Ok(())` - Block successfully applied
+/// * `Err(BlockChainError)` - Block application failed (database error, serialization failure)
+///
+/// # Example Flow
+///
+/// ```text
+/// Block with 2 transactions:
+///   TX1: spends output A, creates outputs B and C
+///   TX2: spends output D, creates output E
+///
+/// Operations collected:
+///   1. Remove output A (from TX1 input)
+///   2. Insert output B (from TX1 output 0)
+///   3. Insert output C (from TX1 output 1)
+///   4. Remove output D (from TX2 input)
+///   5. Insert output E (from TX2 output 0)
+///   6. Insert block
+///
+/// Single database transaction executes all 6 operations atomically.
+/// Recovery store records: [A, D] for potential reversion.
+/// ```
 pub fn apply_block(
     block: Block,
     db: &Database,
@@ -55,6 +120,23 @@ pub fn apply_block(
     Ok(())
 }
 
+/// Converts a transaction into database operations for block application.
+///
+/// This function translates the logical transaction (inputs consuming previous outputs,
+/// outputs creating new UTXOs) into concrete database operations. It does not perform
+/// any database mutations itself - it simply builds the operation list.
+///
+/// For each input, generates a remove operation for the spent output.
+/// For each output, generates an insert operation for the new UTXO.
+///
+/// # Arguments
+///
+/// * `tx` - The transaction to process
+///
+/// # Returns
+///
+/// * `Ok(Vec<DatabaseOperation>)` - List of database operations to apply
+/// * `Err(BlockChainError)` - Currently never fails, reserved for future validation
 fn apply_tx(tx: &Transaction) -> Result<Vec<DatabaseOperation>, BlockChainError> {
     let mut data_operations = Vec::with_capacity(tx.inputs.len() + tx.outputs.len());
 
@@ -80,6 +162,75 @@ fn apply_tx(tx: &Transaction) -> Result<Vec<DatabaseOperation>, BlockChainError>
     Ok(data_operations)
 }
 
+/// Reverts a previously applied block from the blockchain.
+///
+/// This function reverses the state changes made by applying a block, restoring the
+/// blockchain to its state before the block was applied. It:
+/// 1. Removes all outputs created by transactions in the block
+/// 2. Restores all outputs that were spent by the block (from recovery store)
+/// 3. Removes the block itself from the database
+///
+/// # Functional Design and Transactional Approach
+///
+/// Like `apply_block`, this function follows a **functional, batch-and-commit pattern**:
+///
+/// 1. **Retrieve block**: Fetch the block data to know which transactions to revert
+/// 2. **Collect operations**: Build complete list of removal and restoration operations
+/// 3. **Execute atomically**: Apply all operations in a single database transaction
+///
+/// ## Why This Design?
+///
+/// **Reorganization Atomicity**: During blockchain reorganizations, we may need to revert
+/// multiple blocks and apply an alternative chain. Each block reversion must be atomic -
+/// we cannot leave the blockchain in a state where a block is partially reverted.
+///
+/// **Crash Safety**: If the system crashes mid-reversion, the database transaction ensures
+/// that either the block is fully reverted or remains fully applied. No intermediate states
+/// can persist.
+///
+/// **Recovery Data Integrity**: The recovery store contains all data needed to reverse
+/// block application. By processing all operations in a single transaction, we ensure that
+/// recovery data is used consistently and removed from the store only when reversion succeeds.
+///
+/// **State Consistency**: The blockchain must maintain UTXO set consistency. Atomic reversion
+/// guarantees that spent outputs are restored exactly as they existed before block application,
+/// preventing double-spends or missing outputs.
+///
+/// # Arguments
+///
+/// * `block_hash` - Hash of the block to revert
+/// * `db` - Database instance containing blockchain state
+/// * `recovery_store` - Map containing recovery data. The entry for `block_hash` is removed
+///   after successful reversion.
+///
+/// # Returns
+///
+/// * `Ok(Block)` - The reverted block (removed from database)
+/// * `Err(BlockChainError)` - Reversion failed (block not found, database error)
+///
+/// # Panics
+///
+/// Panics if recovery data for the block is not found in the recovery store. This indicates
+/// a critical invariant violation - blocks should only be reverted if they were previously
+/// applied (which creates recovery data).
+///
+/// # Example Flow
+///
+/// ```text
+/// Block being reverted had 1 transaction:
+///   TX1: spent output A, created outputs B and C
+///
+/// Recovery store contains: [(A, original_data)]
+///
+/// Operations collected:
+///   1. Remove block
+///   2. Remove output B (TX1 output 0)
+///   3. Remove output C (TX1 output 1)
+///   4. Insert output A (restore from recovery store)
+///
+/// Single database transaction executes all 4 operations atomically.
+/// Recovery store entry for block_hash is removed.
+/// ```
 pub fn revert_block(
     block_hash: Hash256,
     db: &Database,
@@ -117,6 +268,20 @@ pub fn revert_block(
     Ok(block)
 }
 
+/// Converts a transaction into database operations for block reversion.
+///
+/// This function generates operations to remove all outputs created by a transaction.
+/// It does not handle restoring spent inputs - that's done separately using recovery data
+/// in `revert_block`.
+///
+/// # Arguments
+///
+/// * `tx` - The transaction to revert
+///
+/// # Returns
+///
+/// * `Ok(Vec<DatabaseOperation>)` - List of database operations to revert the transaction
+/// * `Err(BlockChainError)` - Currently never fails, reserved for future use
 fn revert_tx(tx: &Transaction) -> Result<Vec<DatabaseOperation>, BlockChainError> {
     let mut data_operations = Vec::with_capacity(tx.outputs.len());
     for idx in 0..tx.outputs.len() {
