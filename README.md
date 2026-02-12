@@ -56,18 +56,20 @@ struct Block {
 - [x] Signing transactions.
 - [x] Verifying signatures.
 2. Transactions UTXO model
-- [ ] Basic UTXO structure
-- [ ] Transaction creation, validation, execution
-3. Persistence layer (using `sled` crate) - SECTION TBD
-- [ ] Storing blocks
-- [ ] Storing UTXOs
+- [x] Basic UTXO structure
+- [x] Transaction creation, validation, execution
+3. Persistence layer (using `sled` crate)
+- [x] Storing blocks
+- [x] Storing UTXOs
 4. Block format
-- [ ] Merkle tree for transactions
-- [ ] Block header with timestamp, nonce, previous block hash
-- [ ] Block verification, application and revocation
+- ~~[ ] Merkle tree for transactions~~ **UPD: postponed**
+- [x] Block header with timestamp, nonce, previous block hash
+- [x] Block verification, application and revocation
 5. Networking layer
-6. Sync and fork handling
-7. Performance and observability
+- [ ] Handshakes (establishing connection)
+- [ ] Peer discovery
+- [ ] Block and transaction propagation
+6. Mining, sync and fork handling
 
 ### Stage 3 – Implementation of a virtual machine and smart contracts
 

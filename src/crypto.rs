@@ -53,6 +53,20 @@ impl PrivateKey {
             })
             .map_err(CryptoError::MessageSigningFailed)
     }
+
+    /// Derives the corresponding public key from the private key.
+    pub fn public_key(&self) -> PublicKey {
+        PublicKey::from(self)
+    }
+
+    /// Converts the private key to a 32-byte array.
+    ///
+    /// # Safety
+    /// This function exposes the raw bytes of the private key.
+    /// Use with caution to avoid leaking sensitive information.
+    pub(crate) unsafe fn to_bytes_unchecked(&self) -> [u8; 32] {
+        self.0.to_bytes().into()
+    }
 }
 
 /// Public key.
@@ -67,7 +81,7 @@ impl PrivateKey {
 ///
 /// Public keys can be safely shared. They are actively used to verify signatures created by
 /// the corresponding private key and to derive blockchain addresses.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PublicKey(K256PublicKey);
 
 impl PublicKey {
@@ -217,7 +231,7 @@ impl Signature {
 /// SHA-256 hash wrapper.
 ///
 /// Basically a newtype around a 32-byte array representing a SHA-256 hash.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Hash256([u8; 32]);
 
 impl Hash256 {
